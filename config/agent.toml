@@ -1,0 +1,19 @@
+# RoboTunnel Agent Configuration
+
+[server]
+# Port the agent listens on for tunnel connections
+listen_port = 11411
+
+[platform]
+# Platform API URL for heartbeat and registration
+api_url = "https://api.robotunnel.io"
+# Robot API key (set via environment variable RT_API_KEY or here)
+# api_key = "rob_xxxxxxxxxx"
+
+[heartbeat]
+# Heartbeat interval in seconds
+interval_secs = 30
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"

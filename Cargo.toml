@@ -1,0 +1,33 @@
+[workspace]
+members = ["crates/rt-core", "crates/rt-runtime", "crates/rt-skill-debug", "crates/rt-skill-ros2"]
+resolver = "2"
+
+[package]
+name = "robotunnel-agent"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+description = "RoboTunnel Agent — Remote robot management with ZeroClaw runtime"
+
+[[bin]]
+name = "robotunnel-agent"
+path = "src/main.rs"
+
+[dependencies]
+rt-core = { path = "crates/rt-core" }
+rt-runtime = { path = "crates/rt-runtime" }
+rt-skill-debug = { path = "crates/rt-skill-debug" }
+rt-skill-ros2 = { path = "crates/rt-skill-ros2" }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+anyhow = "1"
+futures = "0.3"
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "s"
