@@ -1,0 +1,21 @@
+[package]
+name = "rt-webrtc"
+version = "0.3.0"
+edition = "2021"
+license = "MIT"
+description = "RoboTunnel WebRTC layer — STUN-first P2P with TURN fallback and TCP tunnel last resort"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+webrtc = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+anyhow = "1"
+futures = "0.3"
+reqwest = { version = "0.12", features = ["json"] }
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
