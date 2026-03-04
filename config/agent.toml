@@ -3,6 +3,8 @@
 [server]
 # Port the agent listens on for tunnel connections
 listen_port = 11411
+# Optional Ed25519 public key allowlist (hex). If empty, development mode accepts any key.
+# authorized_keys = ["<64-hex-public-key>"]
 
 [platform]
 # Platform API URL for heartbeat and registration

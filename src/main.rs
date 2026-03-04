@@ -97,10 +97,21 @@ async fn main() -> anyhow::Result<()> {
     // Command channel: tunnel -> router
     let (cmd_tx, cmd_rx) = mpsc::channel(256);
 
+    if config.server.authorized_keys.is_empty() {
+        tracing::warn!(
+            "server.authorized_keys is empty: agent will accept any valid Ed25519 signature (development mode)"
+        );
+    } else {
+        tracing::info!(
+            "server authorized key allowlist enabled ({} key(s))",
+            config.server.authorized_keys.len()
+        );
+    }
+
     // Build tunnel server
     let tunnel_server = TunnelServer::new(
         config.server.listen_port,
-        vec![],
+        config.server.authorized_keys.clone(),
         cmd_tx,
     );
 

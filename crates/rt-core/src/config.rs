@@ -29,6 +29,10 @@ pub struct AgentConfig {
 pub struct ServerConfig {
     #[serde(default = "default_listen_port")]
     pub listen_port: u16,
+    /// Optional Ed25519 public key allowlist (hex, 64 chars each).
+    /// If empty, any valid signature is accepted (development mode).
+    #[serde(default)]
+    pub authorized_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,6 +72,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             listen_port: default_listen_port(),
+            authorized_keys: Vec::new(),
         }
     }
 }

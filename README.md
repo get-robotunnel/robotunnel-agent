@@ -248,7 +248,7 @@ Overage: connections are not cut. You get a 7-day grace period with dashboard/em
 | Version | Status | Highlights |
 |---|---|---|
 | v0.2.0 | ✅ Released | Ed25519 tunnel, debug skill, Kimi AI, Go platform |
-| v0.3.0 | 🔄 In progress | WebRTC P2P, multi-LLM local keys, proactive monitoring, fleet compare, acceptance testing |
+| v0.2.3 | ✅ Released | WebRTC P2P, multi-LLM local keys, proactive monitoring, fleet compare, acceptance testing |
 | v0.4.x | 📋 Planned | Skill Platform — publish your robot's capabilities for others to discover and use |
 
 ---
