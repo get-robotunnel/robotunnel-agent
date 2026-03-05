@@ -1873,18 +1873,25 @@ name = "robotunnel-agent"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "futures",
  "rt-core",
  "rt-llm",
  "rt-runtime",
+ "rt-skill-acceptance",
  "rt-skill-debug",
+ "rt-skill-fleet",
+ "rt-skill-monitor",
  "rt-skill-ros2",
+ "rt-webrtc",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
+ "webrtc",
 ]
 
 [[package]]

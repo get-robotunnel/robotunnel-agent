@@ -18,7 +18,11 @@ rt-core = { path = "crates/rt-core" }
 rt-runtime = { path = "crates/rt-runtime" }
 rt-skill-debug = { path = "crates/rt-skill-debug" }
 rt-skill-ros2 = { path = "crates/rt-skill-ros2" }
+rt-skill-monitor = { path = "crates/rt-skill-monitor" }
+rt-skill-fleet = { path = "crates/rt-skill-fleet" }
+rt-skill-acceptance = { path = "crates/rt-skill-acceptance" }
 rt-llm = { path = "crates/rt-llm" }
+rt-webrtc = { path = "crates/rt-webrtc" }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -27,6 +31,9 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 anyhow = "1"
 futures = "0.3"
+serde_json = "1"
+webrtc = "0.12"
+bytes = "1"
 
 [profile.release]
 strip = true

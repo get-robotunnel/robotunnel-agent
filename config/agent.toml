@@ -12,6 +12,14 @@ api_url = "https://api.robotunnel.io"
 # Robot API key (set via environment variable RT_API_KEY or here)
 # api_key = "rob_xxxxxxxxxx"
 
+[webrtc]
+# Enable WebRTC signaling + ICE bootstrap (agent side)
+enabled = true
+# Optional stable robot identifier for signaling session
+# robot_id = "robot-sim-01"
+# STUN-only phase timeout before TURN fallback
+stun_timeout_secs = 8
+
 [heartbeat]
 # Heartbeat interval in seconds
 interval_secs = 30

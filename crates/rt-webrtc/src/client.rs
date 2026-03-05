@@ -16,19 +16,16 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 use webrtc::{
     api::{
-        interceptor_registry::register_default_interceptors,
-        media_engine::MediaEngine,
-        APIBuilder,
+        interceptor_registry::register_default_interceptors, media_engine::MediaEngine, APIBuilder,
     },
-    data_channel::{data_channel_message::DataChannelMessage, RTCDataChannel},
+    data_channel::RTCDataChannel,
     ice_transport::{
         ice_candidate::{RTCIceCandidate, RTCIceCandidateInit},
         ice_server::RTCIceServer,
     },
     interceptor::registry::Registry,
     peer_connection::{
-        configuration::RTCConfiguration,
-        peer_connection_state::RTCPeerConnectionState,
+        configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState,
         sdp::session_description::RTCSessionDescription,
     },
 };
@@ -43,7 +40,7 @@ use crate::{types::*, ConnectionType, WebRtcConfig};
 /// On error, the caller should fall back to TCP tunnel.
 pub async fn connect(
     cfg: &WebRtcConfig,
-    on_message: Arc<dyn Fn(DataChannelMessage) + Send + Sync>,
+    on_message: Arc<dyn Fn(Vec<u8>) + Send + Sync>,
 ) -> Result<(Arc<RTCDataChannel>, ConnectionType)> {
     // Phase 1: attempt STUN-only
     info!("WebRTC: attempting STUN (direct P2P)...");
@@ -68,7 +65,9 @@ pub async fn connect(
         bail!("TURN not available on platform — WebRTC cannot proceed");
     }
 
-    let turn = turn_creds.turn.context("TURN credentials missing from response")?;
+    let turn = turn_creds
+        .turn
+        .context("TURN credentials missing from response")?;
     let mut ice_servers = turn_creds
         .stun_urls
         .iter()
@@ -85,8 +84,12 @@ pub async fn connect(
         ..Default::default()
     });
 
-    info!("WebRTC: retrying with TURN relay ({})...", turn.urls.join(", "));
-    let dc = attempt_webrtc(cfg, ice_servers, on_message).await
+    info!(
+        "WebRTC: retrying with TURN relay ({})...",
+        turn.urls.join(", ")
+    );
+    let dc = attempt_webrtc(cfg, ice_servers, on_message)
+        .await
         .context("WebRTC failed with both STUN and TURN")?;
 
     info!("WebRTC: connected via TURN relay");
@@ -97,7 +100,7 @@ pub async fn connect(
 async fn attempt_webrtc(
     cfg: &WebRtcConfig,
     ice_servers: Vec<RTCIceServer>,
-    on_message: Arc<dyn Fn(DataChannelMessage) + Send + Sync>,
+    on_message: Arc<dyn Fn(Vec<u8>) + Send + Sync>,
 ) -> Result<Arc<RTCDataChannel>> {
     // Build WebRTC API
     let mut m = MediaEngine::default();
@@ -121,7 +124,7 @@ async fn attempt_webrtc(
     {
         let on_msg = on_message.clone();
         dc.on_message(Box::new(move |msg| {
-            on_msg(msg);
+            on_msg(msg.data.to_vec());
             Box::pin(async {})
         }));
         dc.on_open(Box::new(|| {
@@ -163,7 +166,9 @@ async fn attempt_webrtc(
         payload: Some(serde_json::to_value(&offer)?),
         robot_id: cfg.robot_id.clone(),
     };
-    ws_tx.send(Message::Text(serde_json::to_string(&offer_msg)?.into())).await?;
+    ws_tx
+        .send(Message::Text(serde_json::to_string(&offer_msg)?.into()))
+        .await?;
     debug!("WebRTC: sent SDP offer");
 
     // Wait for answer + ICE candidates (with timeout)
@@ -248,8 +253,8 @@ async fn attempt_webrtc(
     match timeout(connect_timeout, connected_rx).await {
         Ok(Ok(Ok(()))) => Ok(dc),
         Ok(Ok(Err(e))) => bail!("WebRTC connection failed: {}", e),
-        Ok(Err(_))     => bail!("Connection state channel dropped"),
-        Err(_)         => bail!("WebRTC ICE timeout ({}s)", connect_timeout.as_secs()),
+        Ok(Err(_)) => bail!("Connection state channel dropped"),
+        Err(_) => bail!("WebRTC ICE timeout ({}s)", connect_timeout.as_secs()),
     }
 }
 

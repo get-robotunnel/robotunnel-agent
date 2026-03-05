@@ -20,6 +20,8 @@ pub struct AgentConfig {
     #[serde(default)]
     pub platform: PlatformConfig,
     #[serde(default)]
+    pub webrtc: WebRtcConfig,
+    #[serde(default)]
     pub heartbeat: HeartbeatConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -44,6 +46,15 @@ pub struct PlatformConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct WebRtcConfig {
+    #[serde(default = "default_webrtc_enabled")]
+    pub enabled: bool,
+    pub robot_id: Option<String>,
+    #[serde(default = "default_stun_timeout_secs")]
+    pub stun_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct HeartbeatConfig {
     #[serde(default = "default_heartbeat_interval")]
     pub interval_secs: u64,
@@ -63,6 +74,12 @@ fn default_api_url() -> String {
 }
 fn default_heartbeat_interval() -> u64 {
     30
+}
+fn default_webrtc_enabled() -> bool {
+    true
+}
+fn default_stun_timeout_secs() -> u64 {
+    8
 }
 fn default_log_level() -> String {
     "info".to_string()
@@ -94,6 +111,16 @@ impl Default for HeartbeatConfig {
     }
 }
 
+impl Default for WebRtcConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_webrtc_enabled(),
+            robot_id: None,
+            stun_timeout_secs: default_stun_timeout_secs(),
+        }
+    }
+}
+
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
@@ -107,6 +134,7 @@ impl Default for AgentConfig {
         Self {
             server: ServerConfig::default(),
             platform: PlatformConfig::default(),
+            webrtc: WebRtcConfig::default(),
             heartbeat: HeartbeatConfig::default(),
             logging: LoggingConfig::default(),
         }
@@ -144,6 +172,20 @@ impl AgentConfig {
         if let Ok(level) = std::env::var("RT_LOG_LEVEL") {
             self.logging.level = level;
         }
+        if let Ok(enabled) = std::env::var("RT_WEBRTC_ENABLED") {
+            let v = enabled.to_lowercase();
+            self.webrtc.enabled = matches!(v.as_str(), "1" | "true" | "yes" | "on");
+        }
+        if let Ok(robot_id) = std::env::var("RT_ROBOT_ID") {
+            if !robot_id.trim().is_empty() {
+                self.webrtc.robot_id = Some(robot_id);
+            }
+        }
+        if let Ok(timeout) = std::env::var("RT_WEBRTC_STUN_TIMEOUT_SECS") {
+            if let Ok(v) = timeout.parse() {
+                self.webrtc.stun_timeout_secs = v;
+            }
+        }
     }
 }
 
@@ -169,6 +211,11 @@ mod tests {
             api_url = "http://localhost:3000"
             api_key = "rob_test123"
 
+            [webrtc]
+            enabled = true
+            robot_id = "robot-01"
+            stun_timeout_secs = 5
+
             [heartbeat]
             interval_secs = 10
         "#;
@@ -176,6 +223,9 @@ mod tests {
         let config: AgentConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.server.listen_port, 8080);
         assert_eq!(config.platform.api_key, Some("rob_test123".to_string()));
+        assert!(config.webrtc.enabled);
+        assert_eq!(config.webrtc.robot_id.as_deref(), Some("robot-01"));
+        assert_eq!(config.webrtc.stun_timeout_secs, 5);
         assert_eq!(config.heartbeat.interval_secs, 10);
     }
 }

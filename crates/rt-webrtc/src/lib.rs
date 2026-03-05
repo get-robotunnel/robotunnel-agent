@@ -18,7 +18,7 @@
 //! ```
 //!
 //! # Signaling Protocol
-//! Agent connects to `wss://platform/api/signal/{robot_id}?role=agent&token=...`
+//! Agent connects to `wss://platform/api/signal/{robot_id}?role=agent&api_key=...`
 //! Messages: JSON `SignalMessage` structs (type: offer/answer/ice-candidate/bye)
 
 pub mod client;
@@ -40,8 +40,8 @@ pub enum ConnectionType {
 impl ConnectionType {
     pub fn display(&self) -> &'static str {
         match self {
-            ConnectionType::Stun      => "STUN/P2P (direct)",
-            ConnectionType::Turn      => "TURN (relayed)",
+            ConnectionType::Stun => "STUN/P2P (direct)",
+            ConnectionType::Turn => "TURN (relayed)",
             ConnectionType::TcpTunnel => "TCP tunnel (fallback)",
         }
     }
@@ -54,8 +54,8 @@ pub struct WebRtcConfig {
     pub platform_url: String,
     /// Robot ID for session addressing
     pub robot_id: String,
-    /// Platform API token
-    pub token: String,
+    /// Robot API key issued by platform register API
+    pub api_key: String,
     /// ICE gathering timeout before falling back to TURN (seconds)
     pub stun_timeout_secs: u64,
 }
@@ -63,18 +63,18 @@ pub struct WebRtcConfig {
 impl WebRtcConfig {
     pub fn signaling_url(&self) -> String {
         format!(
-            "{}/api/signal/{}?role=agent&token={}",
+            "{}/api/signal/{}?role=agent&api_key={}",
             self.platform_url.trim_end_matches('/'),
             self.robot_id,
-            self.token
+            self.api_key
         )
     }
 
     pub fn turn_credentials_url(&self) -> String {
         format!(
-            "{}/api/turn-credentials?token={}&robot_id={}",
+            "{}/api/turn-credentials?api_key={}&robot_id={}",
             self.platform_url.trim_end_matches('/'),
-            self.token,
+            self.api_key,
             self.robot_id
         )
     }
@@ -82,8 +82,5 @@ impl WebRtcConfig {
 
 /// Convenience: log and report connection type.
 pub fn log_connection_type(conn_type: &ConnectionType) {
-    info!(
-        "WebRTC connection established via {}",
-        conn_type.display()
-    );
+    info!("WebRTC connection established via {}", conn_type.display());
 }

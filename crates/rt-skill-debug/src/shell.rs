@@ -12,6 +12,18 @@ const DEFAULT_MAX_OUTPUT: usize = 64 * 1024; // 64KB
 ///   - cmd (string, required): The shell command to execute
 ///   - timeout (number, optional): Timeout in seconds (default: 30)
 pub async fn handle(request: CommandRequest) -> CommandResponse {
+    if !shell_enabled() {
+        return CommandResponse {
+            id: request.id,
+            status: CommandStatus::Error,
+            data: None,
+            error: Some(
+                "debug.shell is disabled. Set RT_DEBUG_SHELL_ENABLED=true to allow shell commands."
+                    .to_string(),
+            ),
+        };
+    }
+
     let cmd = match request.params.get("cmd").and_then(|v| v.as_str()) {
         Some(cmd) => cmd.to_string(),
         None => {
@@ -57,5 +69,12 @@ pub async fn handle(request: CommandRequest) -> CommandResponse {
             data: None,
             error: Some(format!("execution failed: {}", e)),
         },
+    }
+}
+
+fn shell_enabled() -> bool {
+    match std::env::var("RT_DEBUG_SHELL_ENABLED") {
+        Ok(v) => matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => false,
     }
 }
