@@ -1,6 +1,6 @@
 //! rt-skill-monitor — Proactive health monitoring and anomaly alerting.
 //!
-//! Runs as a background task inside the agent runtime. Samples system metrics
+//! Runs as a background task inside the agent. Samples system metrics
 //! every 30 seconds, detects anomalies via a sliding-window statistical test
 //! (z-score > 2.0 = anomaly), and pushes alerts to the platform when detected.
 //!
@@ -53,7 +53,11 @@ impl MetricSnapshot {
     }
 
     pub fn mem_percent(&self) -> f64 {
-        if self.mem_total_mb > 0.0 { self.mem_used_mb / self.mem_total_mb * 100.0 } else { 0.0 }
+        if self.mem_total_mb > 0.0 {
+            self.mem_used_mb / self.mem_total_mb * 100.0
+        } else {
+            0.0
+        }
     }
 }
 
@@ -117,7 +121,8 @@ impl MonitorService {
     /// Run the monitor loop. Blocks until `shutdown_rx` fires.
     pub async fn run(mut self, mut shutdown_rx: watch::Receiver<bool>) {
         let mut ticker = interval(Duration::from_secs(self.config.sample_interval_secs));
-        info!("MonitorService started (interval={}s, window={}, z={})",
+        info!(
+            "MonitorService started (interval={}s, window={}, z={})",
             self.config.sample_interval_secs,
             self.config.window_size,
             self.config.anomaly_z_threshold
@@ -158,7 +163,9 @@ impl MonitorService {
         }
 
         for (metric, value, mean, stddev) in alerts {
-            let explanation = self.explain_anomaly(&metric, value, mean, stddev, &snap).await;
+            let explanation = self
+                .explain_anomaly(&metric, value, mean, stddev, &snap)
+                .await;
             let alert = MonitorAlert {
                 robot_id: self.config.robot_id.clone(),
                 alert_type: "anomaly".to_string(),
@@ -169,9 +176,14 @@ impl MonitorService {
                 explanation,
                 timestamp_unix: snap.timestamp_unix,
             };
-            warn!("[ALERT] {}: {} = {:.1} (baseline {:.1} ± {:.1}): {}",
-                alert.robot_id, alert.metric, alert.value,
-                alert.baseline_mean, alert.baseline_stddev, alert.explanation
+            warn!(
+                "[ALERT] {}: {} = {:.1} (baseline {:.1} ± {:.1}): {}",
+                alert.robot_id,
+                alert.metric,
+                alert.value,
+                alert.baseline_mean,
+                alert.baseline_stddev,
+                alert.explanation
             );
             self.dispatch_alert(alert).await;
         }
@@ -202,7 +214,12 @@ impl MonitorService {
 
     /// Use LLM to explain the anomaly in natural language, or fall back to a template.
     async fn explain_anomaly(
-        &self, metric: &str, value: f64, mean: f64, stddev: f64, snap: &MetricSnapshot
+        &self,
+        metric: &str,
+        value: f64,
+        mean: f64,
+        stddev: f64,
+        snap: &MetricSnapshot,
     ) -> String {
         if let Some(provider) = &self.config.llm_provider {
             if let Ok(mgr) = LlmManager::open() {
@@ -256,7 +273,9 @@ fn read_cpu_percent() -> Result<f64> {
     }
     let total: u64 = nums.iter().sum();
     let idle = nums.get(3).copied().unwrap_or(0);
-    if total == 0 { return Ok(0.0); }
+    if total == 0 {
+        return Ok(0.0);
+    }
     Ok(100.0 - (idle as f64 / total as f64 * 100.0))
 }
 
@@ -302,7 +321,9 @@ fn read_disk_gb() -> Result<(f64, f64)> {
 }
 
 fn mean_stddev(data: &[f64]) -> Option<(f64, f64)> {
-    if data.is_empty() { return None; }
+    if data.is_empty() {
+        return None;
+    }
     let mean = data.iter().sum::<f64>() / data.len() as f64;
     let variance = data.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / data.len() as f64;
     Some((mean, variance.sqrt()))
@@ -334,8 +355,10 @@ mod tests {
             svc.window.push_back(MetricSnapshot {
                 timestamp_unix: i,
                 cpu_percent: 20.0 + (i as f64 * 0.1),
-                mem_used_mb: 400.0, mem_total_mb: 1000.0,
-                disk_used_gb: 5.0, disk_total_gb: 15.0,
+                mem_used_mb: 400.0,
+                mem_total_mb: 1000.0,
+                disk_used_gb: 5.0,
+                disk_total_gb: 15.0,
                 ros_node_count: None,
             });
         }
@@ -343,8 +366,10 @@ mod tests {
         let spike = MetricSnapshot {
             timestamp_unix: 100,
             cpu_percent: 90.0,
-            mem_used_mb: 400.0, mem_total_mb: 1000.0,
-            disk_used_gb: 5.0, disk_total_gb: 15.0,
+            mem_used_mb: 400.0,
+            mem_total_mb: 1000.0,
+            disk_used_gb: 5.0,
+            disk_total_gb: 15.0,
             ros_node_count: None,
         };
         let anomalies = svc.detect_anomalies(&spike);

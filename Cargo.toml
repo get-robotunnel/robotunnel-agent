@@ -7,7 +7,7 @@ name = "robotunnel-agent"
 version = "0.3.0"
 edition = "2021"
 license = "MIT"
-description = "RoboTunnel Agent — Remote robot management with ZeroClaw runtime"
+description = "RoboTunnel Agent — layered robot connectivity and skill execution"
 
 [[bin]]
 name = "robotunnel-agent"
@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 rt-core = { path = "crates/rt-core" }
-rt-runtime = { path = "crates/rt-runtime" }
+rt-agent-dispatch = { path = "crates/rt-runtime" }
 rt-skill-debug = { path = "crates/rt-skill-debug" }
 rt-skill-ros2 = { path = "crates/rt-skill-ros2" }
 rt-skill-monitor = { path = "crates/rt-skill-monitor" }

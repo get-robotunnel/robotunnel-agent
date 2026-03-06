@@ -6,7 +6,7 @@ license = "MIT"
 description = "RoboTunnel ROS2 Skill — topic discovery and proxying"
 
 [dependencies]
-rt-runtime = { path = "../rt-runtime" }
+rt-agent-dispatch = { path = "../rt-runtime" }
 rt-core = { path = "../rt-core" }
 tokio = { version = "1", features = ["sync", "time"] }
 serde = { version = "1.0", features = ["derive"] }

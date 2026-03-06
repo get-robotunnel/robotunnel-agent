@@ -48,8 +48,7 @@ pub async fn handle(request: CommandRequest) -> CommandResponse {
 }
 
 async fn collect_status() -> Result<SystemStatus, String> {
-    let hostname = read_file_trimmed("/etc/hostname")
-        .unwrap_or_else(|| "unknown".to_string());
+    let hostname = read_file_trimmed("/etc/hostname").unwrap_or_else(|| "unknown".to_string());
 
     let uptime = run_cmd("uptime -p").await.unwrap_or_default();
     let load = run_cmd("cat /proc/loadavg").await.unwrap_or_default();
@@ -118,11 +117,7 @@ fn parse_meminfo() -> Option<MemoryInfo> {
 }
 
 fn parse_kb_value(s: &str) -> u64 {
-    s.trim()
-        .trim_end_matches("kB")
-        .trim()
-        .parse()
-        .unwrap_or(0)
+    s.trim().trim_end_matches("kB").trim().parse().unwrap_or(0)
 }
 
 async fn parse_disk_usage() -> Option<DiskInfo> {

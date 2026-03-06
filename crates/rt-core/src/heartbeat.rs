@@ -70,10 +70,7 @@ impl HeartbeatService {
                 if resp.status().is_success() {
                     tracing::debug!("heartbeat: sent successfully");
                 } else {
-                    tracing::warn!(
-                        "heartbeat: server returned {}",
-                        resp.status()
-                    );
+                    tracing::warn!("heartbeat: server returned {}", resp.status());
                 }
             }
             Err(e) => {

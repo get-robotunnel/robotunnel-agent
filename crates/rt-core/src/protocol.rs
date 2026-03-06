@@ -63,9 +63,7 @@ impl TunnelPacket {
     }
 
     /// Read a packet from an async reader.
-    pub async fn read_from<R: AsyncReadExt + Unpin>(
-        reader: &mut R,
-    ) -> Result<Self, ProtocolError> {
+    pub async fn read_from<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Self, ProtocolError> {
         let topic_len = reader.read_u16().await? as usize;
         if topic_len > 4096 {
             return Err(ProtocolError::InvalidPacket("topic too long".into()));
@@ -98,7 +96,7 @@ impl TunnelPacket {
     }
 }
 
-/// A ZeroClaw command request sent from platform to agent.
+/// A RoboTunnel command request sent from platform to agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandRequest {
     pub id: String,
@@ -107,7 +105,7 @@ pub struct CommandRequest {
     pub params: serde_json::Value,
 }
 
-/// A ZeroClaw command response sent from agent to platform.
+/// A RoboTunnel command response sent from agent to platform.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandResponse {
     pub id: String,
@@ -133,9 +131,9 @@ pub enum CommandStatus {
 pub enum FrameType {
     /// Legacy tunnel packet (ROS2 topic data)
     TunnelPacket = 0x01,
-    /// ZeroClaw command request (JSON)
+    /// RoboTunnel command request (JSON)
     CommandRequest = 0x02,
-    /// ZeroClaw command response (JSON)
+    /// RoboTunnel command response (JSON)
     CommandResponse = 0x03,
     /// Ping/pong for keepalive
     Ping = 0x10,

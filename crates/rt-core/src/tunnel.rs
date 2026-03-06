@@ -2,7 +2,7 @@
 //!
 //! Handles incoming CLI connections with:
 //! - Ed25519 nonce-challenge authentication
-//! - Framed protocol for multiplexing tunnel packets and ZeroClaw commands
+//! - Framed protocol for multiplexing tunnel packets and RoboTunnel commands
 //! - Concurrent client management
 
 use crate::auth::ServerAuthenticator;
@@ -15,7 +15,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing;
 
-/// Incoming command from a connected client, to be processed by the runtime.
+/// Incoming command from a connected client, to be processed by the application layer.
 #[derive(Debug)]
 pub struct IncomingCommand {
     pub request: CommandRequest,
@@ -26,7 +26,7 @@ pub struct IncomingCommand {
 pub struct TunnelServer {
     listen_port: u16,
     authenticator: Arc<ServerAuthenticator>,
-    /// Channel for sending incoming commands to the runtime.
+    /// Channel for sending incoming commands to the application router.
     command_tx: mpsc::Sender<IncomingCommand>,
     /// Broadcast channel for sending data to all connected clients (e.g., topic data).
     broadcast_tx: broadcast::Sender<Vec<u8>>,
@@ -146,9 +146,7 @@ where
             match broadcast_rx.recv().await {
                 Ok(data) => {
                     let mut w = writer_clone.lock().await;
-                    if let Err(e) =
-                        write_frame(&mut *w, FrameType::TunnelPacket, &data).await
-                    {
+                    if let Err(e) = write_frame(&mut *w, FrameType::TunnelPacket, &data).await {
                         tracing::debug!("tunnel: write to client failed: {}", e);
                         break;
                     }
@@ -246,8 +244,14 @@ mod tests {
         let server_handle = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (_broadcast_tx, broadcast_rx) = broadcast::channel(16);
-            handle_client(stream, authenticator, server.command_tx.clone(), broadcast_rx, shutdown)
-                .await
+            handle_client(
+                stream,
+                authenticator,
+                server.command_tx.clone(),
+                broadcast_rx,
+                shutdown,
+            )
+            .await
         });
 
         // Connect as client

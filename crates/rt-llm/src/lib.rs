@@ -49,14 +49,14 @@ impl Provider {
     /// Human-readable display name.
     pub fn display_name(&self) -> &'static str {
         match self {
-            Provider::OpenAI   => "OpenAI (GPT-4)",
-            Provider::Claude   => "Anthropic (Claude)",
-            Provider::Gemini   => "Google (Gemini)",
-            Provider::Grok     => "xAI (Grok)",
+            Provider::OpenAI => "OpenAI (GPT-4)",
+            Provider::Claude => "Anthropic (Claude)",
+            Provider::Gemini => "Google (Gemini)",
+            Provider::Grok => "xAI (Grok)",
             Provider::DeepSeek => "DeepSeek",
-            Provider::MiniMax  => "MiniMax",
-            Provider::Kimi     => "Kimi (Moonshot AI)",
-            Provider::Qwen     => "Qwen (Alibaba Cloud)",
+            Provider::MiniMax => "MiniMax",
+            Provider::Kimi => "Kimi (Moonshot AI)",
+            Provider::Qwen => "Qwen (Alibaba Cloud)",
         }
     }
 }
@@ -126,23 +126,23 @@ impl LlmManager {
     /// Run inference using the specified provider.
     /// Returns the generated text response.
     pub async fn infer(&self, provider: &Provider, req: InferRequest) -> Result<String> {
-        let api_key = self.keystore
-            .get(provider)?
-            .ok_or_else(|| anyhow::anyhow!(
+        let api_key = self.keystore.get(provider)?.ok_or_else(|| {
+            anyhow::anyhow!(
                 "No API key configured for {}. Run: robotunnel-agent keys set {} <api-key>",
                 provider.display_name(),
                 format!("{:?}", provider).to_lowercase()
-            ))?;
+            )
+        })?;
 
         match provider {
-            Provider::OpenAI   => providers::openai::infer(&api_key, req).await,
-            Provider::Claude   => providers::claude::infer(&api_key, req).await,
-            Provider::Gemini   => providers::gemini::infer(&api_key, req).await,
-            Provider::Grok     => providers::grok::infer(&api_key, req).await,
+            Provider::OpenAI => providers::openai::infer(&api_key, req).await,
+            Provider::Claude => providers::claude::infer(&api_key, req).await,
+            Provider::Gemini => providers::gemini::infer(&api_key, req).await,
+            Provider::Grok => providers::grok::infer(&api_key, req).await,
             Provider::DeepSeek => providers::deepseek::infer(&api_key, req).await,
-            Provider::MiniMax  => providers::minimax::infer(&api_key, req).await,
-            Provider::Kimi     => providers::kimi::infer(&api_key, req).await,
-            Provider::Qwen     => providers::qwen::infer(&api_key, req).await,
+            Provider::MiniMax => providers::minimax::infer(&api_key, req).await,
+            Provider::Kimi => providers::kimi::infer(&api_key, req).await,
+            Provider::Qwen => providers::qwen::infer(&api_key, req).await,
         }
     }
 }

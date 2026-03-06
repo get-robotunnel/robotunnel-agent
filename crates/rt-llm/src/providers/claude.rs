@@ -1,9 +1,9 @@
 //! Anthropic (Claude) provider.
 //! API docs: https://docs.anthropic.com/en/api/messages
 
+use crate::InferRequest;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::InferRequest;
 
 #[derive(Serialize)]
 struct MessagesRequest {
@@ -39,7 +39,10 @@ pub async fn infer(api_key: &str, req: InferRequest) -> Result<String> {
         model: "claude-opus-4-5".to_string(),
         max_tokens: req.max_tokens,
         system: req.system,
-        messages: vec![Message { role: "user".into(), content: req.user }],
+        messages: vec![Message {
+            role: "user".into(),
+            content: req.user,
+        }],
     };
 
     let resp = client

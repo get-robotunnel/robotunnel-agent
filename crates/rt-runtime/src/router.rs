@@ -1,4 +1,4 @@
-//! Skill router — dispatches incoming commands to registered skill handlers.
+//! Application router — dispatches incoming commands to registered skill handlers.
 
 use rt_core::protocol::{CommandRequest, CommandResponse, CommandStatus};
 use rt_core::tunnel::IncomingCommand;
@@ -6,18 +6,21 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{mpsc, broadcast};
+use tokio::sync::{broadcast, mpsc};
 use tracing;
 
 /// A skill handler function that processes a command request and returns a response.
 /// Takes a broadcast sender for "push" data (e.g. ROS2 topics).
 pub type SkillHandler = Arc<
-    dyn Fn(CommandRequest, broadcast::Sender<Vec<u8>>) -> Pin<Box<dyn Future<Output = CommandResponse> + Send>>
+    dyn Fn(
+            CommandRequest,
+            broadcast::Sender<Vec<u8>>,
+        ) -> Pin<Box<dyn Future<Output = CommandResponse> + Send>>
         + Send
         + Sync,
 >;
 
-/// Routes incoming commands to registered skill handlers.
+/// Routes incoming commands to registered RoboTunnel skill handlers.
 pub struct Router {
     skills: HashMap<String, SkillHandler>,
     broadcast_tx: broadcast::Sender<Vec<u8>>,
@@ -46,7 +49,10 @@ impl Router {
 
     /// Run the router, consuming commands from the channel.
     pub async fn run(&self, mut rx: mpsc::Receiver<IncomingCommand>) {
-        tracing::info!("router: started with {} skill(s) registered", self.skills.len());
+        tracing::info!(
+            "router: started with {} skill(s) registered",
+            self.skills.len()
+        );
 
         while let Some(incoming) = rx.recv().await {
             let skill_name = &incoming.request.skill;
@@ -77,7 +83,6 @@ impl Router {
         tracing::info!("router: command channel closed, shutting down");
     }
 }
-
 
 #[cfg(test)]
 mod tests {

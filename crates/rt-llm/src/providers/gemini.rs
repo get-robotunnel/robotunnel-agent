@@ -1,9 +1,9 @@
 //! Google Gemini provider.
 //! API docs: https://ai.google.dev/api/generate-content
 
+use crate::InferRequest;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::InferRequest;
 
 #[derive(Serialize)]
 struct GenerateRequest {
@@ -63,11 +63,15 @@ pub async fn infer(api_key: &str, req: InferRequest) -> Result<String> {
     if let Some(system) = &req.system {
         contents.push(Content {
             role: "user".into(),
-            parts: vec![Part { text: format!("[System]: {}", system) }],
+            parts: vec![Part {
+                text: format!("[System]: {}", system),
+            }],
         });
         contents.push(Content {
             role: "model".into(),
-            parts: vec![Part { text: "Understood.".into() }],
+            parts: vec![Part {
+                text: "Understood.".into(),
+            }],
         });
     }
     contents.push(Content {
@@ -77,7 +81,9 @@ pub async fn infer(api_key: &str, req: InferRequest) -> Result<String> {
 
     let body = GenerateRequest {
         contents,
-        generation_config: GenerationConfig { max_output_tokens: req.max_tokens },
+        generation_config: GenerationConfig {
+            max_output_tokens: req.max_tokens,
+        },
     };
 
     let resp = client

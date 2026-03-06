@@ -1,9 +1,9 @@
 //! xAI Grok provider.
 //! API docs: https://docs.x.ai/api (OpenAI-compatible)
 
+use crate::InferRequest;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::InferRequest;
 
 // Grok uses OpenAI-compatible API — same structs, different base URL and model.
 #[derive(Serialize)]
@@ -39,9 +39,15 @@ pub async fn infer(api_key: &str, req: InferRequest) -> Result<String> {
 
     let mut messages = Vec::new();
     if let Some(system) = req.system {
-        messages.push(Message { role: "system".into(), content: system });
+        messages.push(Message {
+            role: "system".into(),
+            content: system,
+        });
     }
-    messages.push(Message { role: "user".into(), content: req.user });
+    messages.push(Message {
+        role: "user".into(),
+        content: req.user,
+    });
 
     let body = ChatRequest {
         model: "grok-3".to_string(),

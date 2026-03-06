@@ -79,7 +79,8 @@ pub async fn compare(
     ).await?;
 
     // Identify outlier robot IDs (simple heuristic: >2x fleet avg CPU or RAM)
-    let outliers: Vec<String> = fleet.iter()
+    let outliers: Vec<String> = fleet
+        .iter()
         .filter(|r| r.cpu_percent > avg_cpu * 2.0 || r.mem_percent > avg_mem * 1.5)
         .map(|r| r.robot_id.clone())
         .collect();
@@ -118,7 +119,8 @@ mod tests {
         ];
         let avg_cpu = fleet.iter().map(|r| r.cpu_percent).sum::<f64>() / fleet.len() as f64;
         let avg_mem = fleet.iter().map(|r| r.mem_percent).sum::<f64>() / fleet.len() as f64;
-        let outliers: Vec<String> = fleet.iter()
+        let outliers: Vec<String> = fleet
+            .iter()
             .filter(|r| r.cpu_percent > avg_cpu * 2.0 || r.mem_percent > avg_mem * 1.5)
             .map(|r| r.robot_id.clone())
             .collect();

@@ -35,22 +35,29 @@ pub struct AcceptanceReport {
 
 impl AcceptanceReport {
     pub fn pass_rate(&self) -> f64 {
-        if self.total_robots == 0 { 0.0 }
-        else { self.passed as f64 / self.total_robots as f64 * 100.0 }
+        if self.total_robots == 0 {
+            0.0
+        } else {
+            self.passed as f64 / self.total_robots as f64 * 100.0
+        }
     }
 }
 
 /// Run an acceptance test across a fleet.
 ///
 /// `robot_results` contains raw per-robot observable data (already collected
-/// by the runtime from each agent). The LLM evaluates pass/fail per robot
+/// by the agent from each robot). The LLM evaluates pass/fail per robot
 /// and generates a human-readable summary.
 pub async fn run_acceptance_test(
     task: &str,
     robot_results: Vec<RobotObservation>,
     provider: &Provider,
 ) -> Result<AcceptanceReport> {
-    info!("Acceptance test: '{}' across {} robots", task, robot_results.len());
+    info!(
+        "Acceptance test: '{}' across {} robots",
+        task,
+        robot_results.len()
+    );
 
     if robot_results.is_empty() {
         return Ok(AcceptanceReport {
@@ -72,10 +79,15 @@ pub async fn run_acceptance_test(
          and ROS topic data. Format: numbered list, each check on one line.",
         task = task
     );
-    let checks = mgr.infer(
-        provider,
-        InferRequest::with_system("You are a robotics QA engineer. Be concise.", decompose_prompt),
-    ).await?;
+    let checks = mgr
+        .infer(
+            provider,
+            InferRequest::with_system(
+                "You are a robotics QA engineer. Be concise.",
+                decompose_prompt,
+            ),
+        )
+        .await?;
 
     // Step 2: Evaluate each robot against the checks
     let observations_json = serde_json::to_string_pretty(&robot_results)?;
@@ -90,28 +102,39 @@ pub async fn run_acceptance_test(
         observations = observations_json
     );
 
-    let eval_result = mgr.infer(
-        provider,
-        InferRequest::with_system("You are a robotics QA engineer. Be concise and precise.", eval_prompt),
-    ).await?;
+    let eval_result = mgr
+        .infer(
+            provider,
+            InferRequest::with_system(
+                "You are a robotics QA engineer. Be concise and precise.",
+                eval_prompt,
+            ),
+        )
+        .await?;
 
     // Parse robot-level results from LLM response
-    let results: Vec<RobotTestResult> = robot_results.iter().map(|obs| {
-        let line = eval_result.lines()
-            .find(|l| l.contains(&obs.robot_id))
-            .unwrap_or("");
-        let passed = line.contains("PASS");
-        let details = line.split('—').nth(1)
-            .unwrap_or("No evaluation available")
-            .trim()
-            .to_string();
-        RobotTestResult {
-            robot_id: obs.robot_id.clone(),
-            passed,
-            details,
-            cycle_time_secs: obs.cycle_time_secs,
-        }
-    }).collect();
+    let results: Vec<RobotTestResult> = robot_results
+        .iter()
+        .map(|obs| {
+            let line = eval_result
+                .lines()
+                .find(|l| l.contains(&obs.robot_id))
+                .unwrap_or("");
+            let passed = line.contains("PASS");
+            let details = line
+                .split('—')
+                .nth(1)
+                .unwrap_or("No evaluation available")
+                .trim()
+                .to_string();
+            RobotTestResult {
+                robot_id: obs.robot_id.clone(),
+                passed,
+                details,
+                cycle_time_secs: obs.cycle_time_secs,
+            }
+        })
+        .collect();
 
     let passed = results.iter().filter(|r| r.passed).count();
     let failed = results.len() - passed;
@@ -121,15 +144,20 @@ pub async fn run_acceptance_test(
         "{}/{} robots passed the acceptance test for: \"{}\". \
          Key issues: {}. \
          Write a 2-sentence executive summary suitable for a non-technical manager.",
-        passed, results.len(), task,
-        results.iter()
+        passed,
+        results.len(),
+        task,
+        results
+            .iter()
             .filter(|r| !r.passed)
             .map(|r| format!("{}: {}", r.robot_id, r.details))
             .collect::<Vec<_>>()
             .join("; ")
     );
 
-    let summary = mgr.infer(provider, InferRequest::simple(summary_prompt)).await
+    let summary = mgr
+        .infer(provider, InferRequest::simple(summary_prompt))
+        .await
         .unwrap_or_else(|_| format!("{}/{} robots passed.", passed, results.len()));
 
     Ok(AcceptanceReport {
@@ -142,7 +170,7 @@ pub async fn run_acceptance_test(
     })
 }
 
-/// Raw observable data from one robot, provided by the runtime.
+/// Raw observable data from one robot, provided by the agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RobotObservation {
     pub robot_id: String,

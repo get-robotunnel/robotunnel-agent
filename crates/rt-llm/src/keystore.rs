@@ -14,13 +14,9 @@ use aes_gcm::{
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use hkdf::Hkdf;
-use sha2::Sha256;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    fs,
-    path::PathBuf,
-};
+use sha2::Sha256;
+use std::{collections::HashMap, fs, path::PathBuf};
 
 use crate::Provider;
 
@@ -44,8 +40,8 @@ impl KeyStore {
         let enc_key = derive_encryption_key()?;
 
         let map = if path.exists() {
-            let ciphertext = fs::read(&path)
-                .with_context(|| format!("reading key store at {:?}", path))?;
+            let ciphertext =
+                fs::read(&path).with_context(|| format!("reading key store at {:?}", path))?;
             decrypt_map(&enc_key, &ciphertext)?
         } else {
             // First run — create parent dir, empty map
@@ -86,8 +82,14 @@ impl KeyStore {
     /// List all configured providers with masked API keys.
     pub fn list(&self) -> Vec<(Provider, String)> {
         let all_providers = [
-            Provider::OpenAI, Provider::Claude, Provider::Gemini, Provider::Grok,
-            Provider::DeepSeek, Provider::MiniMax, Provider::Kimi, Provider::Qwen,
+            Provider::OpenAI,
+            Provider::Claude,
+            Provider::Gemini,
+            Provider::Grok,
+            Provider::DeepSeek,
+            Provider::MiniMax,
+            Provider::Kimi,
+            Provider::Qwen,
         ];
         all_providers
             .into_iter()
@@ -109,8 +111,7 @@ impl KeyStore {
     }
 
     fn store_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("~/.config"));
+        let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("~/.config"));
         Ok(config_dir.join("robotunnel").join("agent.keys"))
     }
 }
@@ -204,15 +205,15 @@ fn decrypt_map(enc_key: &[u8; 32], raw: &[u8]) -> Result<KeyMap> {
     let key = Key::<Aes256Gcm>::from_slice(enc_key);
     let cipher = Aes256Gcm::new(key);
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext.as_slice())
-        .map_err(|_| anyhow::anyhow!(
+    let plaintext = cipher.decrypt(nonce, ciphertext.as_slice()).map_err(|_| {
+        anyhow::anyhow!(
             "Key store decryption failed. This usually means the file was created on \
              a different machine. Delete {:?} to reset.",
             dirs::config_dir()
                 .unwrap_or_default()
                 .join("robotunnel/agent.keys")
-        ))?;
+        )
+    })?;
 
     serde_json::from_slice(&plaintext).context("parsing decrypted key map")
 }

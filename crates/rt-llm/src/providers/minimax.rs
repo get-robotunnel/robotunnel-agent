@@ -1,9 +1,9 @@
 //! MiniMax provider.
 //! API docs: https://platform.minimaxi.com/document/ChatCompletion%20v2
 
+use crate::InferRequest;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::InferRequest;
 
 #[derive(Serialize)]
 struct ChatRequest {
@@ -46,7 +46,11 @@ pub async fn infer(api_key: &str, req: InferRequest) -> Result<String> {
             name: Some("MM智能助理".into()),
         });
     }
-    messages.push(Message { role: "user".into(), content: req.user, name: None });
+    messages.push(Message {
+        role: "user".into(),
+        content: req.user,
+        name: None,
+    });
 
     let body = ChatRequest {
         model: "MiniMax-Text-01".to_string(),

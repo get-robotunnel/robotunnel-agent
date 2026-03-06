@@ -1,9 +1,9 @@
 //! DeepSeek provider.
 //! API docs: https://platform.deepseek.com/api-docs/ (OpenAI-compatible)
 
+use crate::InferRequest;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::InferRequest;
 
 #[derive(Serialize)]
 struct ChatRequest {
@@ -38,9 +38,15 @@ pub async fn infer(api_key: &str, req: InferRequest) -> Result<String> {
 
     let mut messages = Vec::new();
     if let Some(system) = req.system {
-        messages.push(Message { role: "system".into(), content: system });
+        messages.push(Message {
+            role: "system".into(),
+            content: system,
+        });
     }
-    messages.push(Message { role: "user".into(), content: req.user });
+    messages.push(Message {
+        role: "user".into(),
+        content: req.user,
+    });
 
     let body = ChatRequest {
         model: "deepseek-chat".to_string(),

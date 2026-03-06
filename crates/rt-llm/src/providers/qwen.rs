@@ -2,9 +2,9 @@
 //! API docs: https://help.aliyun.com/zh/model-studio/developer-reference/use-qwen-by-calling-api
 //! Uses OpenAI-compatible endpoint.
 
+use crate::InferRequest;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use crate::InferRequest;
 
 #[derive(Serialize)]
 struct ChatRequest {
@@ -39,9 +39,15 @@ pub async fn infer(api_key: &str, req: InferRequest) -> Result<String> {
 
     let mut messages = Vec::new();
     if let Some(system) = req.system {
-        messages.push(Message { role: "system".into(), content: system });
+        messages.push(Message {
+            role: "system".into(),
+            content: system,
+        });
     }
-    messages.push(Message { role: "user".into(), content: req.user });
+    messages.push(Message {
+        role: "user".into(),
+        content: req.user,
+    });
 
     let body = ChatRequest {
         model: "qwen-plus".to_string(),

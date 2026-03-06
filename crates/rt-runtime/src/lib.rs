@@ -1,3 +1,5 @@
+//! Shared dispatch primitives for the RoboTunnel agent application layer.
+
 pub mod executor;
 pub mod router;
 
@@ -27,5 +29,10 @@ pub trait Skill: Send + Sync {
 
     /// Execute an action within this skill.
     /// Takes the broadcast channel for "push" data streaming.
-    async fn execute(&self, action: &str, params: Value, broadcast_tx: broadcast::Sender<Vec<u8>>) -> ExecutionResult;
+    async fn execute(
+        &self,
+        action: &str,
+        params: Value,
+        broadcast_tx: broadcast::Sender<Vec<u8>>,
+    ) -> ExecutionResult;
 }

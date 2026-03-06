@@ -15,7 +15,7 @@
 
 ---
 
-RoboTunnel Agent is a lightweight, open-source Rust runtime that runs on your robot. It creates an encrypted tunnel to the RoboTunnel Platform, enabling remote debugging, proactive fleet monitoring, and natural-language control — all without opening ports or managing VPNs. LLM API keys are stored **encrypted on the robot only** and never transmitted to any server.
+RoboTunnel Agent is a lightweight, open-source Rust agent that runs on your robot. It maintains secure connectivity to the RoboTunnel Platform and executes robot-side skills for remote debugging, proactive fleet monitoring, and natural-language control. LLM API keys are stored **encrypted on the robot only** and never transmitted to any server.
 
 ## Architecture
 
@@ -71,7 +71,8 @@ RoboTunnel solves four scenarios that are broken in today's CLI-first world:
 We built this for the robotics developer community. Trust is non-negotiable.
 
 - **Ed25519 Handshake**: Every agent-platform connection uses a cryptographic challenge-response. No pre-shared passwords.
-- **Zero open ports on your robot**: The agent initiates the outbound connection. Your robot never listens for inbound connections.
+- **Explicit trust boundary**: The agent requires an Ed25519 public-key allowlist by default. Development-mode permissive auth must be explicitly enabled.
+- **Robot-side execution stays local**: Connectivity is authenticated with Ed25519, and robot logic plus LLM calls stay on-device. The current transport stack uses WebRTC when available and authenticated TCP compatibility paths where needed.
 - **Local-first LLM keys**: Your OpenAI, Claude, Gemini, and other API keys are stored in `~/.config/robotunnel/agent.keys`, encrypted with AES-256-GCM using a key derived from your machine ID. **These keys are never sent to our servers — not in transit, not in logs, not ever.** We are architecturally prevented from seeing them because we never receive them.
 - **Auditable**: This repository is the complete agent source. No binary blobs, no closed-source components.
 
@@ -176,6 +177,12 @@ Keys are stored in `~/.config/robotunnel/agent.keys`. The file is AES-256-GCM en
 ## Built-in Skills (Default, Always Available)
 
 These four scenarios are provided by the platform and require no additional configuration:
+
+You can discover the machine-readable built-in skill contracts from the agent itself:
+
+```bash
+robotunnel skill robot-abc123 system capabilities
+```
 
 ### 1. Remote Debug (`rt-skill-debug`)
 Stream ROS topics, view system logs, inspect processes — everything your local `ros2 topic echo` does, but over WAN with a stable persistent connection.

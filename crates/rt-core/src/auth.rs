@@ -8,7 +8,7 @@
 //! 5. Server verifies signature against the provided public key
 //! 6. Server checks public key against registered keys (via platform API or local cache)
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey, Verifier};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::RngCore;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -45,10 +45,7 @@ impl ServerAuthenticator {
 
     /// Perform server-side authentication on a connected stream.
     /// Returns the hex-encoded public key of the authenticated client.
-    pub async fn authenticate<S>(
-        &self,
-        stream: &mut S,
-    ) -> Result<String, AuthError>
+    pub async fn authenticate<S>(&self, stream: &mut S) -> Result<String, AuthError>
     where
         S: AsyncReadExt + AsyncWriteExt + Unpin,
     {
@@ -70,8 +67,8 @@ impl ServerAuthenticator {
         tracing::debug!("auth: received key+signature");
 
         // 3. Verify signature
-        let verifying_key = VerifyingKey::from_bytes(&pub_key_bytes)
-            .map_err(|_| AuthError::InvalidPublicKey)?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&pub_key_bytes).map_err(|_| AuthError::InvalidPublicKey)?;
         let signature = Signature::from_bytes(&sig_bytes);
 
         verifying_key
@@ -82,9 +79,7 @@ impl ServerAuthenticator {
         tracing::info!("auth: valid signature from key {}", &pub_key_hex[..16]);
 
         // 4. Check authorization
-        if !self.authorized_keys.is_empty()
-            && !self.authorized_keys.contains(&pub_key_hex)
-        {
+        if !self.authorized_keys.is_empty() && !self.authorized_keys.contains(&pub_key_hex) {
             tracing::warn!("auth: key {} not in authorized list", &pub_key_hex[..16]);
             // Send rejection byte
             stream.write_u8(0x00).await?;
@@ -113,10 +108,7 @@ impl ClientAuthenticator {
     }
 
     /// Perform client-side authentication on a connected stream.
-    pub async fn authenticate<S>(
-        &self,
-        stream: &mut S,
-    ) -> Result<(), AuthError>
+    pub async fn authenticate<S>(&self, stream: &mut S) -> Result<(), AuthError>
     where
         S: AsyncReadExt + AsyncWriteExt + Unpin,
     {
@@ -184,13 +176,11 @@ mod tests {
 
         let (mut server_stream, mut client_stream) = duplex(1024);
 
-        let server_handle = tokio::spawn(async move {
-            server_auth.authenticate(&mut server_stream).await
-        });
+        let server_handle =
+            tokio::spawn(async move { server_auth.authenticate(&mut server_stream).await });
 
-        let client_handle = tokio::spawn(async move {
-            client_auth.authenticate(&mut client_stream).await
-        });
+        let client_handle =
+            tokio::spawn(async move { client_auth.authenticate(&mut client_stream).await });
 
         let server_result = server_handle.await.unwrap();
         let client_result = client_handle.await.unwrap();
@@ -204,17 +194,17 @@ mod tests {
         let seed: [u8; 32] = [42u8; 32];
         let client_auth = ClientAuthenticator::from_seed(&seed);
         // Server only accepts a different key
-        let server_auth = ServerAuthenticator::new(vec!["0000000000000000000000000000000000000000000000000000000000000000".to_string()]);
+        let server_auth = ServerAuthenticator::new(vec![
+            "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        ]);
 
         let (mut server_stream, mut client_stream) = duplex(1024);
 
-        let server_handle = tokio::spawn(async move {
-            server_auth.authenticate(&mut server_stream).await
-        });
+        let server_handle =
+            tokio::spawn(async move { server_auth.authenticate(&mut server_stream).await });
 
-        let client_handle = tokio::spawn(async move {
-            client_auth.authenticate(&mut client_stream).await
-        });
+        let client_handle =
+            tokio::spawn(async move { client_auth.authenticate(&mut client_stream).await });
 
         let server_result = server_handle.await.unwrap();
         let client_result = client_handle.await.unwrap();

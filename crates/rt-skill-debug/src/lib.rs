@@ -7,7 +7,10 @@ use tokio::sync::broadcast;
 use tracing;
 
 /// Handle a debug skill command request.
-pub async fn handle(request: CommandRequest, _broadcast_tx: broadcast::Sender<Vec<u8>>) -> CommandResponse {
+pub async fn handle(
+    request: CommandRequest,
+    _broadcast_tx: broadcast::Sender<Vec<u8>>,
+) -> CommandResponse {
     tracing::debug!("debug skill: handling action '{}'", request.action);
 
     match request.action.as_str() {

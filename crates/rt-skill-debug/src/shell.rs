@@ -1,7 +1,7 @@
 //! Shell command execution handler for the Debug Skill.
 
+use rt_agent_dispatch::executor;
 use rt_core::protocol::{CommandRequest, CommandResponse, CommandStatus};
-use rt_runtime::executor;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_MAX_OUTPUT: usize = 64 * 1024; // 64KB

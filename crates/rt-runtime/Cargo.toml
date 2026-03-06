@@ -1,9 +1,9 @@
 [package]
-name = "rt-runtime"
+name = "rt-agent-dispatch"
 version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "ZeroClaw runtime — command execution and skill routing"
+description = "RoboTunnel agent command dispatch and execution helpers"
 
 [dependencies]
 tokio = { version = "1", features = ["process", "time", "sync"] }

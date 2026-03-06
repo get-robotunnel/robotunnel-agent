@@ -1,7 +1,7 @@
 //! Journal log viewer for the Debug Skill.
 
+use rt_agent_dispatch::executor;
 use rt_core::protocol::{CommandRequest, CommandResponse, CommandStatus};
-use rt_runtime::executor;
 
 /// Handle a "logs" action.
 ///

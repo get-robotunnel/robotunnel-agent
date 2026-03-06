@@ -1876,9 +1876,9 @@ dependencies = [
  "bytes",
  "clap",
  "futures",
+ "rt-agent-dispatch",
  "rt-core",
  "rt-llm",
- "rt-runtime",
  "rt-skill-acceptance",
  "rt-skill-debug",
  "rt-skill-fleet",
@@ -1892,6 +1892,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webrtc",
+]
+
+[[package]]
+name = "rt-agent-dispatch"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "rt-core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1931,19 +1944,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rt-runtime"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "rt-core",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "rt-skill-acceptance"
 version = "0.3.0"
 dependencies = [
@@ -1961,8 +1961,8 @@ name = "rt-skill-debug"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "rt-agent-dispatch",
  "rt-core",
- "rt-runtime",
  "serde",
  "serde_json",
  "tokio",
@@ -2003,8 +2003,8 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures",
+ "rt-agent-dispatch",
  "rt-core",
- "rt-runtime",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
