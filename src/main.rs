@@ -9,6 +9,7 @@
 mod application;
 mod interaction;
 
+use application::MonitorSettings;
 use clap::{Parser, Subcommand};
 use rt_core::config::AgentConfig;
 use rt_core::heartbeat::HeartbeatService;
@@ -43,6 +44,11 @@ enum Command {
         #[command(subcommand)]
         action: KeysAction,
     },
+    /// Manage local monitor alert settings
+    Monitor {
+        #[command(subcommand)]
+        action: MonitorAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -63,6 +69,17 @@ enum KeysAction {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum MonitorAction {
+    /// Persist monitor alert settings on this device
+    SetAlert {
+        /// Key=value settings such as cpu_threshold=85 notify=discord webhook_url=https://...
+        settings: Vec<String>,
+    },
+    /// Show the current monitor alert settings
+    Show,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -70,6 +87,9 @@ async fn main() -> anyhow::Result<()> {
     // Handle key management subcommands (no tunnel needed)
     if let Some(Command::Keys { action }) = args.command {
         return handle_keys(action).await;
+    }
+    if let Some(Command::Monitor { action }) = args.command {
+        return handle_monitor(action).await;
     }
 
     // --- Agent mode ---
@@ -118,7 +138,11 @@ async fn main() -> anyhow::Result<()> {
 
     let router = application::build_application_router(tunnel_server.broadcast_tx());
 
-    let monitor_handle = application::start_monitor_service_if_enabled(shutdown_rx.clone());
+    let monitor_handle = application::start_monitor_service_if_enabled(
+        shutdown_rx.clone(),
+        Some(config.platform.api_url.clone()),
+        config.platform.api_key.clone(),
+    );
 
     // Heartbeat service
     let heartbeat_handle = if let Some(api_key) = &config.platform.api_key {
@@ -219,4 +243,73 @@ async fn handle_keys(action: KeysAction) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+async fn handle_monitor(action: MonitorAction) -> anyhow::Result<()> {
+    match action {
+        MonitorAction::SetAlert { settings } => {
+            let mut config = MonitorSettings::load()?;
+            let warnings = config.apply_overrides(&settings)?;
+            config.save()?;
+
+            println!("✓ Monitor alert settings saved.");
+            print_monitor_settings(&config);
+            for warning in warnings {
+                println!("Warning: {}", warning);
+            }
+        }
+        MonitorAction::Show => {
+            let config = MonitorSettings::load()?;
+            print_monitor_settings(&config);
+        }
+    }
+
+    Ok(())
+}
+
+fn print_monitor_settings(config: &MonitorSettings) {
+    println!("enabled: {}", yes_no(config.enabled));
+    println!("sample_interval_secs: {}", config.sample_interval_secs);
+    println!(
+        "cpu_threshold: {}",
+        config
+            .cpu_threshold_percent
+            .map(|v| format!("{:.1}", v))
+            .unwrap_or_else(|| "auto".to_string())
+    );
+    println!(
+        "mem_threshold: {}",
+        config
+            .mem_threshold_percent
+            .map(|v| format!("{:.1}", v))
+            .unwrap_or_else(|| "auto".to_string())
+    );
+    println!("notify: {}", config.notify);
+    println!(
+        "webhook_url: {}",
+        config
+            .webhook_url
+            .as_deref()
+            .map(mask_secret_url)
+            .unwrap_or_else(|| "(not set)".to_string())
+    );
+    println!(
+        "provider: {}",
+        config.provider.as_deref().unwrap_or("(not set)")
+    );
+}
+
+fn yes_no(v: bool) -> &'static str {
+    if v {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+fn mask_secret_url(url: &str) -> String {
+    if url.len() <= 16 {
+        return "*".repeat(url.len());
+    }
+    format!("{}...{}", &url[..12], &url[url.len() - 4..])
 }

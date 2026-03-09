@@ -72,10 +72,20 @@ pub struct MonitorConfig {
     pub anomaly_z_threshold: f64,
     /// Platform alert webhook URL (POST JSON)
     pub alert_webhook_url: Option<String>,
+    /// Platform API base URL for managed alert delivery
+    pub platform_api_url: Option<String>,
+    /// Robot API key used to authenticate alert delivery with the platform
+    pub robot_api_key: Option<String>,
+    /// Alert delivery target: log, webhook, discord
+    pub notify_target: String,
     /// LLM provider for alert explanation (optional)
     pub llm_provider: Option<Provider>,
     /// Robot ID to include in alerts
     pub robot_id: String,
+    /// Optional absolute CPU alert threshold
+    pub cpu_threshold_percent: Option<f64>,
+    /// Optional absolute memory alert threshold
+    pub mem_threshold_percent: Option<f64>,
 }
 
 impl Default for MonitorConfig {
@@ -85,8 +95,13 @@ impl Default for MonitorConfig {
             window_size: 20,
             anomaly_z_threshold: 2.0,
             alert_webhook_url: None,
+            platform_api_url: None,
+            robot_api_key: None,
+            notify_target: "log".to_string(),
             llm_provider: None,
             robot_id: "unknown".to_string(),
+            cpu_threshold_percent: None,
+            mem_threshold_percent: None,
         }
     }
 }
@@ -102,6 +117,14 @@ pub struct MonitorAlert {
     pub baseline_stddev: f64,
     pub explanation: String,
     pub timestamp_unix: u64,
+}
+
+struct PendingAlert {
+    alert_type: String,
+    metric: String,
+    value: f64,
+    baseline_mean: f64,
+    baseline_stddev: f64,
 }
 
 /// The monitoring background service.
@@ -122,10 +145,11 @@ impl MonitorService {
     pub async fn run(mut self, mut shutdown_rx: watch::Receiver<bool>) {
         let mut ticker = interval(Duration::from_secs(self.config.sample_interval_secs));
         info!(
-            "MonitorService started (interval={}s, window={}, z={})",
+            "MonitorService started (interval={}s, window={}, z={}, notify={})",
             self.config.sample_interval_secs,
             self.config.window_size,
-            self.config.anomaly_z_threshold
+            self.config.anomaly_z_threshold,
+            self.config.notify_target,
         );
 
         loop {
@@ -162,17 +186,23 @@ impl MonitorService {
             return Ok(());
         }
 
-        for (metric, value, mean, stddev) in alerts {
+        for pending in alerts {
             let explanation = self
-                .explain_anomaly(&metric, value, mean, stddev, &snap)
+                .explain_anomaly(
+                    &pending.metric,
+                    pending.value,
+                    pending.baseline_mean,
+                    pending.baseline_stddev,
+                    &snap,
+                )
                 .await;
             let alert = MonitorAlert {
                 robot_id: self.config.robot_id.clone(),
-                alert_type: "anomaly".to_string(),
-                metric: metric.clone(),
-                value,
-                baseline_mean: mean,
-                baseline_stddev: stddev,
+                alert_type: pending.alert_type,
+                metric: pending.metric.clone(),
+                value: pending.value,
+                baseline_mean: pending.baseline_mean,
+                baseline_stddev: pending.baseline_stddev,
                 explanation,
                 timestamp_unix: snap.timestamp_unix,
             };
@@ -191,7 +221,7 @@ impl MonitorService {
         Ok(())
     }
 
-    fn detect_anomalies(&self, snap: &MetricSnapshot) -> Vec<(String, f64, f64, f64)> {
+    fn detect_anomalies(&self, snap: &MetricSnapshot) -> Vec<PendingAlert> {
         let cpus: Vec<f64> = self.window.iter().map(|s| s.cpu_percent).collect();
         let mems: Vec<f64> = self.window.iter().map(|s| s.mem_percent()).collect();
 
@@ -204,12 +234,57 @@ impl MonitorService {
                 if stddev > 0.5 {
                     let z = (current - mean) / stddev;
                     if z.abs() > self.config.anomaly_z_threshold {
-                        anomalies.push((name.to_string(), current, mean, stddev));
+                        anomalies.push(PendingAlert {
+                            alert_type: "anomaly".to_string(),
+                            metric: name.to_string(),
+                            value: current,
+                            baseline_mean: mean,
+                            baseline_stddev: stddev,
+                        });
                     }
                 }
             }
         }
+
+        self.push_threshold_alert(
+            &mut anomalies,
+            "cpu_percent",
+            snap.cpu_percent,
+            self.config.cpu_threshold_percent,
+        );
+        self.push_threshold_alert(
+            &mut anomalies,
+            "mem_percent",
+            snap.mem_percent(),
+            self.config.mem_threshold_percent,
+        );
         anomalies
+    }
+
+    fn push_threshold_alert(
+        &self,
+        alerts: &mut Vec<PendingAlert>,
+        metric: &str,
+        value: f64,
+        threshold: Option<f64>,
+    ) {
+        let Some(limit) = threshold else {
+            return;
+        };
+        if value < limit {
+            return;
+        }
+        if alerts.iter().any(|alert| alert.metric == metric) {
+            return;
+        }
+
+        alerts.push(PendingAlert {
+            alert_type: "threshold".to_string(),
+            metric: metric.to_string(),
+            value,
+            baseline_mean: limit,
+            baseline_stddev: 0.0,
+        });
     }
 
     /// Use LLM to explain the anomaly in natural language, or fall back to a template.
@@ -245,15 +320,111 @@ impl MonitorService {
     }
 
     async fn dispatch_alert(&self, alert: MonitorAlert) {
-        if let Some(url) = &self.config.alert_webhook_url {
-            let client = reqwest::Client::new();
-            if let Err(e) = client.post(url).json(&alert).send().await {
-                warn!("alert dispatch failed: {}", e);
+        match self.config.notify_target.as_str() {
+            "log" => {}
+            "webhook" => {
+                if let Some(url) = &self.config.alert_webhook_url {
+                    let client = reqwest::Client::new();
+                    if let Err(e) = client.post(url).json(&alert).send().await {
+                        warn!("alert dispatch failed: {}", e);
+                    }
+                } else {
+                    warn!("webhook alert requested but no alert_webhook_url configured");
+                }
             }
+            "platform" | "discord" => {
+                if let (Some(api_url), Some(api_key)) =
+                    (&self.config.platform_api_url, &self.config.robot_api_key)
+                {
+                    let client = reqwest::Client::new();
+                    let body = serde_json::json!({
+                        "api_key": api_key,
+                        "notify_target": "discord",
+                        "alert_type": alert.alert_type,
+                        "metric": alert.metric,
+                        "value": alert.value,
+                        "baseline_mean": alert.baseline_mean,
+                        "baseline_stddev": alert.baseline_stddev,
+                        "explanation": alert.explanation,
+                        "timestamp_unix": alert.timestamp_unix,
+                    });
+                    let endpoint = format!("{}/api/alerts", api_url.trim_end_matches('/'));
+                    if let Err(e) = client.post(endpoint).json(&body).send().await {
+                        warn!("platform discord alert dispatch failed: {}", e);
+                    }
+                } else {
+                    warn!("discord alert requested but platform_api_url/api_key is not configured");
+                }
+            }
+            other => warn!("unknown notify_target '{}'", other),
         }
     }
 }
 
+#[cfg(test)]
+impl MonitorService {
+    fn detect_for_test(&self, snap: &MetricSnapshot) -> Vec<(String, String)> {
+        self.detect_anomalies(snap)
+            .into_iter()
+            .map(|alert| (alert.alert_type, alert.metric))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(cpu: f64, mem_percent: f64) -> MetricSnapshot {
+        MetricSnapshot {
+            timestamp_unix: 1,
+            cpu_percent: cpu,
+            mem_used_mb: mem_percent,
+            mem_total_mb: 100.0,
+            disk_used_gb: 10.0,
+            disk_total_gb: 100.0,
+            ros_node_count: None,
+        }
+    }
+
+    #[test]
+    fn threshold_alerts_fire_without_baseline() {
+        let service = MonitorService {
+            config: MonitorConfig {
+                cpu_threshold_percent: Some(80.0),
+                ..MonitorConfig::default()
+            },
+            window: VecDeque::new(),
+        };
+
+        let alerts = service.detect_for_test(&sample(90.0, 50.0));
+        assert!(alerts.contains(&(String::from("threshold"), String::from("cpu_percent"))));
+    }
+
+    #[test]
+    fn threshold_does_not_duplicate_anomaly_metric() {
+        let mut service = MonitorService {
+            config: MonitorConfig {
+                cpu_threshold_percent: Some(80.0),
+                ..MonitorConfig::default()
+            },
+            window: VecDeque::from(vec![
+                sample(10.0, 10.0),
+                sample(10.0, 10.0),
+                sample(10.0, 10.0),
+                sample(10.0, 10.0),
+                sample(10.0, 10.0),
+            ]),
+        };
+
+        let alerts = service.detect_for_test(&sample(90.0, 10.0));
+        let cpu_alerts = alerts
+            .into_iter()
+            .filter(|(_, metric)| metric == "cpu_percent")
+            .count();
+        assert_eq!(cpu_alerts, 1);
+    }
+}
 // ---------------------------------------------------------------------------
 // /proc readers (Linux)
 // ---------------------------------------------------------------------------
@@ -374,6 +545,6 @@ mod tests {
         };
         let anomalies = svc.detect_anomalies(&spike);
         assert!(!anomalies.is_empty(), "Should detect CPU spike as anomaly");
-        assert_eq!(anomalies[0].0, "cpu_percent");
+        assert_eq!(anomalies[0].metric, "cpu_percent");
     }
 }

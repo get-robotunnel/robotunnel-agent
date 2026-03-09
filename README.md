@@ -146,7 +146,7 @@ robot-abc123   192.168.1.105   🟢 Online   STUN/P2P     Just now
 
 ## Setting Up LLM Keys
 
-The agent supports 8 LLM providers. Keys are stored locally, encrypted. The agent calls the provider API directly — your platform subscription does not cover LLM costs; you pay your provider directly with your own key.
+Run these commands on the machine where `robotunnel-agent` is installed, typically the robot itself or an SSH session into that robot. Keys are stored locally, encrypted. The agent calls the provider API directly — your platform subscription does not cover LLM costs; you pay your provider directly with your own key.
 
 ```bash
 # Set a key (stored encrypted on this machine only)
@@ -172,11 +172,35 @@ robotunnel-agent keys remove openai
 
 Keys are stored in `~/.config/robotunnel/agent.keys`. The file is AES-256-GCM encrypted using a key derived from your machine's hardware ID. Even if someone copies this file to another machine, it cannot be decrypted.
 
+Monitor alert settings are also local to the robot:
+
+```bash
+# Persist monitor alert settings on the robot
+robotunnel-agent monitor set-alert cpu_threshold=85 notify=platform
+
+# Inspect current monitor settings
+robotunnel-agent monitor show
+```
+
+The monitor config is stored in `~/.config/robotunnel/monitor.toml`.
+`notify=platform` means "send alert events to the platform, and let the platform deliver them to any subscribed targets such as Discord channels or webhooks." `notify=discord` is kept as a compatibility alias. If you need a local-only fallback during development, `notify=webhook webhook_url=...` is still supported.
+
+For normal day-to-day use, remote monitor configuration should go through the structured `system` skill instead of remote shell access:
+
+```bash
+robotunnel skill robot-abc123 system config_get --params '{"section":"monitor"}'
+robotunnel skill robot-abc123 system config_set --params '{"section":"monitor","settings":{"enabled":true,"cpu_threshold_percent":85,"notify":"platform"}}'
+```
+
 ---
 
 ## Built-in Skills (Default, Always Available)
 
-These four scenarios are provided by the platform and require no additional configuration:
+These four scenarios are provided by the platform. The generic low-level CLI entry point is always:
+
+```bash
+robotunnel skill <robot-selector> <skill> <action> --params '{"...":"..."}'
+```
 
 You can discover the machine-readable built-in skill contracts from the agent itself:
 
@@ -188,49 +212,76 @@ robotunnel skill robot-abc123 system capabilities
 Stream ROS topics, view system logs, inspect processes — everything your local `ros2 topic echo` does, but over WAN with a stable persistent connection.
 
 ```bash
+# Primary CLI workflow: open the debug tunnel
 robotunnel connect robot-abc123
 # Your local ROS tools now see the remote robot
 ros2 topic list
 ros2 topic echo /joint_states
+
+# Direct skill actions are also available
+robotunnel skill robot-abc123 debug status
+robotunnel skill robot-abc123 debug logs --params '{"lines":50}'
+robotunnel skill robot-abc123 debug shell --params '{"cmd":"uptime"}'
 ```
 
 ### 2. Proactive Fleet Monitoring (`rt-skill-monitor`)
 The agent continuously samples health metrics and pushes alerts to you when anomalies are detected — without you having to ask.
 
 ```bash
-# Configure alert threshold and destination
-robotunnel-agent monitor set-alert cpu_threshold=85 notify=discord
+# Configure local alert policy on the robot
+robotunnel-agent monitor set-alert cpu_threshold=85 notify=platform
 
-# Example alert you receive automatically:
-# [RoboTunnel Alert] Robot #2 — CPU spike detected (92% for 3min).
-# Baseline: 35%. Possible cause: runaway process. Process tree attached.
+# Query a one-shot health snapshot from the generic skill entry point
+robotunnel skill robot-abc123 monitor status
+
+# Read or update the remote monitor config over the structured config skill
+robotunnel skill robot-abc123 system config_get --params '{"section":"monitor"}'
+robotunnel skill robot-abc123 system config_set --params '{"section":"monitor","settings":{"cpu_threshold_percent":85,"notify":"platform"}}'
+
+# In Discord, subscribe the current channel to platform-managed alerts
+rt alerts here robot-abc123
+
+# Or subscribe a platform-managed webhook target
+rt alerts webhook https://example.com/robot-alerts robot-abc123
 ```
 
 ### 3. Fleet State Comparison (`rt-skill-fleet`)
-Ask why one robot is behaving differently from the rest. The agent collects state snapshots from all connected robots and generates a natural-language diff.
+Ask why one robot is behaving differently from the rest. The platform collects health snapshots from the selected robots, then sends the aggregated payload to one coordinator agent for the local LLM step.
 
 ```bash
-robotunnel fleet compare --query "Why is robot-3 moving slower than the others?"
-# Analyzing 5 robots...
-# Robot-3 anomalies vs fleet average:
-#   • CPU: 78% (fleet avg: 34%) — motion_planner process consuming 44%
-#   • /cmd_vel publish rate: 8Hz (fleet avg: 20Hz)
-#   • Last error: costmap_2d: [WARN] inflation radius exceeds obstacle range
-# Likely cause: costmap configuration mismatch. Suggested fix: ...
+# The CLI keeps a single generic skill entry point.
+# The first robot is the coordinator agent that owns the LLM key.
+robotunnel skill robot-1 fleet compare \
+  --params '{"query":"Why is robot-3 moving slower than the others?","provider":"openai","robot_ids":["robot-1","robot-2","robot-3"]}'
 ```
 
 ### 4. Acceptance Testing (`rt-skill-acceptance`)
-Describe a task in plain language. The system decomposes it into observable checks, runs them across your fleet, and returns a pass/fail report — no scripting required.
+Describe a task in plain language. The platform gathers current observations from the selected robots, then one coordinator agent decomposes the task and returns a pass/fail report.
 
 ```bash
-robotunnel fleet test --task "Confirm all robots can complete a pick-and-place cycle"
-# Testing 5 robots against task criteria...
-# ✓ Robot-1: PASS (cycle time: 4.2s)
-# ✓ Robot-2: PASS (cycle time: 4.5s)
-# ✗ Robot-3: FAIL — gripper sensor timeout at stage 3
-# ✓ Robot-4: PASS (cycle time: 4.1s)
-# ✓ Robot-5: PASS (cycle time: 4.3s)
-# Result: 4/5 PASS. Report saved to ./acceptance_report_20260302.json
+robotunnel skill robot-1 acceptance test \
+  --params '{"task":"Confirm all robots can complete a pick-and-place cycle","provider":"openai","robot_ids":["robot-1","robot-2","robot-3"]}'
+```
+
+### Discord Commands
+
+If the platform operator has connected the RoboTunnel Discord bot, the same skills are available from Discord after login:
+
+```text
+rt login <platform_token>
+rt robots
+rt status <robot_selector>
+rt logs <robot_selector> [lines]
+rt shell <robot_selector> <command...>
+rt monitor <robot_selector>
+rt compare Why is robot-3 moving slower than the others?
+rt test Confirm all robots can complete a pick-and-place cycle
+rt skill <robot_selector> <skill> <action> {"param":"value"}
+rt alerts
+rt alerts here [robot_selector|all]
+rt alerts webhook <url> [robot_selector|all]
+rt alerts off [robot_selector|all]
+rt alerts off webhook <url> [robot_selector|all]
 ```
 
 ---

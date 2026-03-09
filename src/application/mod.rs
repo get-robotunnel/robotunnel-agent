@@ -6,8 +6,10 @@
 //! - request dispatch into the application router
 
 mod contracts;
+mod monitor_config;
 
 use self::contracts::BuiltinContracts;
+pub use self::monitor_config::MonitorSettings;
 use rt_agent_dispatch::router::Router;
 use rt_agent_dispatch::Skill;
 use rt_core::protocol::{CommandRequest, CommandResponse, CommandStatus};
@@ -29,12 +31,7 @@ pub fn build_application_router(broadcast_tx: broadcast::Sender<Vec<u8>>) -> Rou
     let system_contracts = contracts.clone();
     router.register("system", move |req, _tx| {
         let contracts = system_contracts.clone();
-        async move {
-            if let Err(err) = contracts.validate(&req) {
-                return err_response(req.id, err);
-            }
-            ok_response(req.id, contracts.capabilities_payload())
-        }
+        async move { handle_system_skill(req, &contracts).await }
     });
     tracing::info!("registered skill: system");
 
@@ -121,14 +118,26 @@ pub fn build_application_router(broadcast_tx: broadcast::Sender<Vec<u8>>) -> Rou
 
 pub fn start_monitor_service_if_enabled(
     shutdown_rx: watch::Receiver<bool>,
+    platform_api_url: Option<String>,
+    robot_api_key: Option<String>,
 ) -> Option<JoinHandle<()>> {
-    if !parse_bool_env("RT_MONITOR_ENABLED", true) {
+    let local_config = MonitorSettings::load().unwrap_or_else(|err| {
+        tracing::warn!("failed to load monitor config: {}", err);
+        MonitorSettings::default()
+    });
+
+    let monitor_enabled = match std::env::var("RT_MONITOR_ENABLED") {
+        Ok(v) => parse_bool_env_value(&v),
+        Err(_) => local_config.enabled,
+    };
+    if !monitor_enabled {
         tracing::info!("monitor background service disabled (RT_MONITOR_ENABLED=false)");
         return None;
     }
 
     let provider = std::env::var("RT_MONITOR_PROVIDER")
         .ok()
+        .or_else(|| local_config.provider.clone())
         .and_then(|s| Provider::from_str(&s).ok());
     let robot_id = std::env::var("RT_ROBOT_ID")
         .or_else(|_| std::env::var("HOSTNAME"))
@@ -136,20 +145,123 @@ pub fn start_monitor_service_if_enabled(
     let interval = std::env::var("RT_MONITOR_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(30);
-    let webhook = std::env::var("RT_MONITOR_WEBHOOK_URL").ok();
+        .unwrap_or(local_config.sample_interval_secs);
+    let webhook = std::env::var("RT_MONITOR_WEBHOOK_URL")
+        .ok()
+        .or_else(|| local_config.webhook_url.clone());
+    let notify_target = std::env::var("RT_MONITOR_NOTIFY")
+        .ok()
+        .unwrap_or_else(|| local_config.notify.clone());
+    let cpu_threshold = std::env::var("RT_MONITOR_CPU_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .or(local_config.cpu_threshold_percent);
+    let mem_threshold = std::env::var("RT_MONITOR_MEM_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .or(local_config.mem_threshold_percent);
 
     let svc = MonitorService::new(MonitorConfig {
         sample_interval_secs: interval,
         alert_webhook_url: webhook,
+        platform_api_url,
+        robot_api_key,
+        notify_target,
         llm_provider: provider,
         robot_id,
+        cpu_threshold_percent: cpu_threshold,
+        mem_threshold_percent: mem_threshold,
         ..MonitorConfig::default()
     });
 
     Some(tokio::spawn(async move {
         svc.run(shutdown_rx).await;
     }))
+}
+
+async fn handle_system_skill(req: CommandRequest, contracts: &BuiltinContracts) -> CommandResponse {
+    if let Err(err) = contracts.validate(&req) {
+        return err_response(req.id, err);
+    }
+
+    match req.action.as_str() {
+        "capabilities" => ok_response(req.id, contracts.capabilities_payload()),
+        "config_get" => handle_system_config_get(req),
+        "config_set" => handle_system_config_set(req),
+        _ => err_response(req.id, format!("unknown system action: {}", req.action)),
+    }
+}
+
+fn handle_system_config_get(req: CommandRequest) -> CommandResponse {
+    let Some(section) = req.params.get("section").and_then(|value| value.as_str()) else {
+        return err_response(req.id, "missing required param 'section'".to_string());
+    };
+
+    match section {
+        "monitor" => match MonitorSettings::load() {
+            Ok(settings) => match serde_json::to_value(settings) {
+                Ok(data) => ok_response(
+                    req.id,
+                    serde_json::json!({
+                        "section": "monitor",
+                        "settings": data,
+                    }),
+                ),
+                Err(err) => {
+                    err_response(req.id, format!("serialize monitor config failed: {}", err))
+                }
+            },
+            Err(err) => err_response(req.id, format!("load monitor config failed: {}", err)),
+        },
+        other => err_response(req.id, format!("unknown config section: {}", other)),
+    }
+}
+
+fn handle_system_config_set(req: CommandRequest) -> CommandResponse {
+    let Some(section) = req.params.get("section").and_then(|value| value.as_str()) else {
+        return err_response(req.id, "missing required param 'section'".to_string());
+    };
+    let Some(settings) = req
+        .params
+        .get("settings")
+        .and_then(|value| value.as_object())
+    else {
+        return err_response(req.id, "missing required param 'settings'".to_string());
+    };
+
+    match section {
+        "monitor" => {
+            let mut current = match MonitorSettings::load() {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    return err_response(req.id, format!("load monitor config failed: {}", err))
+                }
+            };
+            let warnings = match current.apply_structured_settings(settings) {
+                Ok(warnings) => warnings,
+                Err(err) => {
+                    return err_response(req.id, format!("invalid monitor config: {}", err))
+                }
+            };
+            if let Err(err) = current.save() {
+                return err_response(req.id, format!("save monitor config failed: {}", err));
+            }
+            match serde_json::to_value(&current) {
+                Ok(data) => ok_response(
+                    req.id,
+                    serde_json::json!({
+                        "section": "monitor",
+                        "settings": data,
+                        "warnings": warnings,
+                    }),
+                ),
+                Err(err) => {
+                    err_response(req.id, format!("serialize monitor config failed: {}", err))
+                }
+            }
+        }
+        other => err_response(req.id, format!("unknown config section: {}", other)),
+    }
 }
 
 pub async fn dispatch_request(
@@ -315,9 +427,6 @@ fn acceptance_report_response(id: String, report: AcceptanceReport) -> CommandRe
     }
 }
 
-fn parse_bool_env(key: &str, default: bool) -> bool {
-    match std::env::var(key) {
-        Ok(v) => matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"),
-        Err(_) => default,
-    }
+fn parse_bool_env_value(v: &str) -> bool {
+    matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }

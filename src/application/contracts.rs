@@ -53,11 +53,41 @@ impl BuiltinContracts {
                 name: "system",
                 kind: "builtin",
                 description: "Agent metadata and capability discovery.",
-                actions: vec![ActionContract {
-                    name: "capabilities",
-                    description: "Return machine-readable contracts for built-in skills.",
-                    params: vec![],
-                }],
+                actions: vec![
+                    ActionContract {
+                        name: "capabilities",
+                        description: "Return machine-readable contracts for built-in skills.",
+                        params: vec![],
+                    },
+                    ActionContract {
+                        name: "config_get",
+                        description: "Read a structured local agent config section.",
+                        params: vec![param(
+                            "section",
+                            ParamType::String,
+                            true,
+                            "Config section name, for example 'monitor'.",
+                        )],
+                    },
+                    ActionContract {
+                        name: "config_set",
+                        description: "Update a structured local agent config section.",
+                        params: vec![
+                            param(
+                                "section",
+                                ParamType::String,
+                                true,
+                                "Config section name, for example 'monitor'.",
+                            ),
+                            param(
+                                "settings",
+                                ParamType::Object,
+                                true,
+                                "Partial structured config payload.",
+                            ),
+                        ],
+                    },
+                ],
             },
         );
         skills.insert(
