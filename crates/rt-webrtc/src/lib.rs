@@ -50,7 +50,8 @@ impl ConnectionType {
 /// Configuration for the WebRTC client.
 #[derive(Clone, Debug)]
 pub struct WebRtcConfig {
-    /// Platform signaling WebSocket URL, e.g. wss://api.robotunnel.io
+    /// Platform base URL, typically `https://api.robotunnel.io`.
+    /// Also accepts `ws://` / `wss://`; methods normalize as needed.
     pub platform_url: String,
     /// Robot ID for session addressing
     pub robot_id: String,
@@ -64,7 +65,7 @@ impl WebRtcConfig {
     pub fn signaling_url(&self) -> String {
         format!(
             "{}/api/signal/{}?role=agent&api_key={}",
-            self.platform_url.trim_end_matches('/'),
+            self.signaling_base_url(),
             self.robot_id,
             self.api_key
         )
@@ -73,14 +74,76 @@ impl WebRtcConfig {
     pub fn turn_credentials_url(&self) -> String {
         format!(
             "{}/api/turn-credentials?api_key={}&robot_id={}",
-            self.platform_url.trim_end_matches('/'),
+            self.http_base_url(),
             self.api_key,
             self.robot_id
         )
+    }
+
+    fn signaling_base_url(&self) -> String {
+        let trimmed = self.platform_url.trim_end_matches('/');
+        if let Some(rest) = trimmed.strip_prefix("https://") {
+            return format!("wss://{}", rest);
+        }
+        if let Some(rest) = trimmed.strip_prefix("http://") {
+            return format!("ws://{}", rest);
+        }
+        trimmed.to_string()
+    }
+
+    fn http_base_url(&self) -> String {
+        let trimmed = self.platform_url.trim_end_matches('/');
+        if let Some(rest) = trimmed.strip_prefix("wss://") {
+            return format!("https://{}", rest);
+        }
+        if let Some(rest) = trimmed.strip_prefix("ws://") {
+            return format!("http://{}", rest);
+        }
+        trimmed.to_string()
     }
 }
 
 /// Convenience: log and report connection type.
 pub fn log_connection_type(conn_type: &ConnectionType) {
     info!("WebRTC connection established via {}", conn_type.display());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_cfg(platform_url: &str) -> WebRtcConfig {
+        WebRtcConfig {
+            platform_url: platform_url.to_string(),
+            robot_id: "robot-123".to_string(),
+            api_key: "rob_test".to_string(),
+            stun_timeout_secs: 8,
+        }
+    }
+
+    #[test]
+    fn test_url_build_from_https_base() {
+        let cfg = make_cfg("https://api.robotunnel.io/");
+        assert_eq!(
+            cfg.signaling_url(),
+            "wss://api.robotunnel.io/api/signal/robot-123?role=agent&api_key=rob_test"
+        );
+        assert_eq!(
+            cfg.turn_credentials_url(),
+            "https://api.robotunnel.io/api/turn-credentials?api_key=rob_test&robot_id=robot-123"
+        );
+    }
+
+    #[test]
+    fn test_url_build_from_wss_base() {
+        let cfg = make_cfg("wss://api.robotunnel.io");
+        assert_eq!(
+            cfg.signaling_url(),
+            "wss://api.robotunnel.io/api/signal/robot-123?role=agent&api_key=rob_test"
+        );
+        assert_eq!(
+            cfg.turn_credentials_url(),
+            "https://api.robotunnel.io/api/turn-credentials?api_key=rob_test&robot_id=robot-123"
+        );
+    }
 }

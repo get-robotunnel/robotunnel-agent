@@ -275,11 +275,12 @@ async fn attempt_webrtc(
 /// Fetch TURN credentials from the platform.
 async fn fetch_turn_credentials(cfg: &WebRtcConfig) -> Result<TurnCredentialResponse> {
     let client = reqwest::Client::new();
+    let url = cfg.turn_credentials_url();
     let resp = client
-        .get(&cfg.turn_credentials_url())
+        .get(&url)
         .send()
         .await
-        .context("fetching TURN credentials")?
+        .with_context(|| format!("fetching TURN credentials from {}", url))?
         .error_for_status()
         .context("TURN credentials endpoint error")?
         .json::<TurnCredentialResponse>()
