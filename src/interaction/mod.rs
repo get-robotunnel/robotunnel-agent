@@ -5,6 +5,7 @@
 
 use crate::application;
 use bytes::Bytes;
+use rt_core::authorized_keys::fetch_agent_bootstrap;
 use rt_core::config::AgentConfig;
 use rt_core::protocol::{CommandRequest, CommandResponse, CommandStatus, FrameType};
 use rt_core::tunnel::IncomingCommand;
@@ -35,23 +36,48 @@ pub fn start_webrtc_bridge_if_enabled(
         }
     };
 
-    let cfg = WebRtcConfig {
-        platform_url: to_ws_base_url(&config.platform.api_url),
-        robot_id: config
-            .webrtc
-            .robot_id
-            .clone()
-            .or_else(|| std::env::var("HOSTNAME").ok())
-            .unwrap_or_else(|| "unknown".to_string()),
-        api_key,
-        stun_timeout_secs: config.webrtc.stun_timeout_secs,
-    };
+    let configured_robot_id = config
+        .webrtc
+        .robot_id
+        .clone()
+        .or_else(|| std::env::var("RT_ROBOT_ID").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let platform_api_url = config.platform.api_url.clone();
+    let platform_ws_url = to_ws_base_url(&platform_api_url);
+    let stun_timeout_secs = config.webrtc.stun_timeout_secs;
 
     Some(tokio::spawn(async move {
+        let mut resolved_robot_id = configured_robot_id.clone();
         loop {
             if *shutdown_rx.borrow() {
                 break;
             }
+
+            if resolved_robot_id.is_none() {
+                resolved_robot_id = resolve_robot_id_from_platform(&platform_api_url, &api_key).await;
+            }
+
+            let robot_id = match resolved_robot_id.clone() {
+                Some(value) => value,
+                None => {
+                    tracing::warn!(
+                        "webrtc: robot_id missing and bootstrap lookup failed; retrying later"
+                    );
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs(20)) => {}
+                        _ = shutdown_rx.changed() => { break; }
+                    }
+                    continue;
+                }
+            };
+
+            let cfg = WebRtcConfig {
+                platform_url: platform_ws_url.clone(),
+                robot_id,
+                api_key: api_key.clone(),
+                stun_timeout_secs,
+            };
 
             let (dc_payload_tx, mut dc_payload_rx) = mpsc::channel::<Vec<u8>>(256);
             tracing::info!("webrtc: attempting bootstrap for robot_id={}", cfg.robot_id);
@@ -100,6 +126,16 @@ pub fn start_webrtc_bridge_if_enabled(
             }
         }
     }))
+}
+
+async fn resolve_robot_id_from_platform(api_url: &str, api_key: &str) -> Option<String> {
+    match fetch_agent_bootstrap(api_url, api_key).await {
+        Ok(bootstrap) => bootstrap.robot_id,
+        Err(err) => {
+            tracing::warn!("webrtc: failed to resolve robot_id from platform: {}", err);
+            None
+        }
+    }
 }
 
 fn log_webrtc_connected(conn_type: &ConnectionType) {

@@ -4,6 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
+#[derive(Debug, Clone)]
+pub struct AgentBootstrap {
+    pub robot_id: Option<String>,
+    pub authorized_keys: Vec<String>,
+}
+
 pub struct AuthorizedKeysSyncService {
     api_url: String,
     api_key: String,
@@ -14,6 +20,8 @@ pub struct AuthorizedKeysSyncService {
 
 #[derive(Debug, Deserialize)]
 struct AuthorizedKeysResponse {
+    #[serde(default)]
+    robot_id: Option<String>,
     #[serde(default)]
     authorized_keys: Vec<String>,
 }
@@ -63,16 +71,8 @@ impl AuthorizedKeysSyncService {
     }
 
     async fn sync_once(&self, tunnel_server: &Arc<TunnelServer>) {
-        let url = format!(
-            "{}/api/agent/authorized-keys?api_key={}",
-            self.api_url.trim_end_matches('/'),
-            self.api_key
-        );
-
-        match self.client.get(&url).send().await {
-            Ok(resp) => match resp.error_for_status() {
-                Ok(resp) => match resp.json::<AuthorizedKeysResponse>().await {
-                    Ok(payload) => {
+        match fetch_agent_bootstrap_with_client(&self.client, &self.api_url, &self.api_key).await {
+            Ok(payload) => {
                         let mut merged_keys = self.static_authorized_keys.clone();
                         merged_keys.extend(payload.authorized_keys);
                         let merged_keys = normalize_keys(merged_keys);
@@ -87,20 +87,50 @@ impl AuthorizedKeysSyncService {
                         } else {
                             tracing::debug!("authorized_keys: allowlist unchanged");
                         }
-                    }
-                    Err(err) => {
-                        tracing::warn!("authorized_keys: parse failed: {}", err);
-                    }
-                },
-                Err(err) => {
-                    tracing::warn!("authorized_keys: server returned error: {}", err);
-                }
-            },
+            }
             Err(err) => {
                 tracing::warn!("authorized_keys: sync failed: {}", err);
             }
         }
     }
+}
+
+pub async fn fetch_agent_bootstrap(
+    api_url: &str,
+    api_key: &str,
+) -> Result<AgentBootstrap, reqwest::Error> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    fetch_agent_bootstrap_with_client(&client, api_url, api_key).await
+}
+
+async fn fetch_agent_bootstrap_with_client(
+    client: &reqwest::Client,
+    api_url: &str,
+    api_key: &str,
+) -> Result<AgentBootstrap, reqwest::Error> {
+    let url = format!(
+        "{}/api/agent/authorized-keys?api_key={}",
+        api_url.trim_end_matches('/'),
+        api_key
+    );
+
+    let payload = client
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<AuthorizedKeysResponse>()
+        .await?;
+
+    Ok(AgentBootstrap {
+        robot_id: payload
+            .robot_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        authorized_keys: payload.authorized_keys,
+    })
 }
 
 fn normalize_keys(keys: Vec<String>) -> Vec<String> {
