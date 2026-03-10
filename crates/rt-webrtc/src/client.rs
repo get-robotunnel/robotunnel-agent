@@ -73,6 +73,23 @@ pub async fn connect(
     let turn = turn_creds
         .turn
         .context("TURN credentials missing from response")?;
+    let filtered_turn_urls = filter_supported_turn_urls(&turn.urls);
+    for skipped in turn
+        .urls
+        .iter()
+        .filter(|url| !filtered_turn_urls.iter().any(|kept| kept == *url))
+    {
+        warn!(
+            "WebRTC: skipping unsupported TURN URL for current ICE stack: {}",
+            skipped
+        );
+    }
+    if filtered_turn_urls.is_empty() {
+        bail!(
+            "TURN credentials available but no supported TURN URL (currently requires turn:... over UDP)"
+        );
+    }
+
     let mut ice_servers = turn_creds
         .stun_urls
         .iter()
@@ -83,7 +100,7 @@ pub async fn connect(
         .collect::<Vec<_>>();
 
     ice_servers.push(RTCIceServer {
-        urls: turn.urls.clone(),
+        urls: filtered_turn_urls.clone(),
         username: turn.username.clone(),
         credential: turn.credential.clone(),
         ..Default::default()
@@ -91,7 +108,7 @@ pub async fn connect(
 
     info!(
         "WebRTC: retrying with TURN relay ({})...",
-        turn.urls.join(", ")
+        filtered_turn_urls.join(", ")
     );
     let dc = attempt_webrtc(cfg, ice_servers, on_message)
         .await
@@ -321,6 +338,31 @@ fn parse_bool_like(value: &str) -> bool {
     )
 }
 
+fn filter_supported_turn_urls(urls: &[String]) -> Vec<String> {
+    urls.iter()
+        .filter(|url| is_supported_turn_url(url))
+        .cloned()
+        .collect()
+}
+
+fn is_supported_turn_url(url: &str) -> bool {
+    let normalized = url.trim().to_ascii_lowercase();
+    if !normalized.starts_with("turn:") {
+        return false;
+    }
+
+    let Some((_, query)) = normalized.split_once('?') else {
+        return true;
+    };
+
+    for kv in query.split('&') {
+        if let Some(value) = kv.strip_prefix("transport=") {
+            return value == "udp";
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +379,17 @@ mod tests {
         assert!(!parse_bool_like("false"));
         assert!(!parse_bool_like("0"));
         assert!(!parse_bool_like("off"));
+    }
+
+    #[test]
+    fn test_is_supported_turn_url() {
+        assert!(is_supported_turn_url("turn:turn.robotunnel.io:3478"));
+        assert!(is_supported_turn_url(
+            "turn:turn.robotunnel.io:3478?transport=udp"
+        ));
+        assert!(!is_supported_turn_url(
+            "turn:turn.robotunnel.io:3478?transport=tcp"
+        ));
+        assert!(!is_supported_turn_url("turns:turn.robotunnel.io:5349"));
     }
 }
