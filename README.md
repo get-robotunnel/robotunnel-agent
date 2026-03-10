@@ -135,7 +135,10 @@ chmod +x install-agent.sh
 ./install-agent.sh ./install-agent.config
 ```
 
-The installer prefers the published GitHub release binary, falls back to `cargo build --release` when needed, registers the robot via `/api/register`, writes `~/.config/robotunnel/agent.toml`, and starts the agent in the background. The script source of truth lives in [`scripts/install-agent.sh`](./scripts/install-agent.sh).
+The installer prefers the published GitHub release binary, falls back to `cargo build --release` when needed, registers the robot via `/api/register`, fetches the platform-managed `authorized_keys` bootstrap set, writes `~/.config/robotunnel/agent.toml`, and starts the agent in the background. The script source of truth lives in [`scripts/install-agent.sh`](./scripts/install-agent.sh).
+By default the installer writes `server.authorized_keys` automatically from the platform trust bootstrap path. That set includes the platform gateway key and may include registered CLI device keys for the owning user. If you provide `AUTHORIZED_KEYS` in `install-agent.config`, the installer merges them with the platform-provided keys; it only falls back to `server.insecure_allow_any_client=true` if key bootstrap fails entirely.
+After startup, the agent periodically refreshes its TCP `authorized_keys` allowlist from the platform using its `robot_api_key`, so newly registered CLI devices can use direct TCP without manual edits to `agent.toml`.
+LLM API keys are not required during install. You can add them later on the robot with `robotunnel-agent keys set ...` after the agent is already online.
 
 If you want to force a source-build fallback, still use the installer:
 
@@ -147,6 +150,8 @@ cp ./scripts/install-agent.config.example ./scripts/install-agent.config
 # Edit ./scripts/install-agent.config first, then:
 AGENT_INSTALL_METHOD=build ./scripts/install-agent.sh ./scripts/install-agent.config
 ```
+
+If you start the binary manually after installation, `robotunnel-agent` now checks `~/.config/robotunnel/agent.toml` automatically before falling back to `/etc/robotunnel/agent.toml`.
 
 On success you'll see:
 ```

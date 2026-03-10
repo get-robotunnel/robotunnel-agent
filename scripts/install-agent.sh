@@ -80,6 +80,45 @@ github_repo_path() {
   echo "${url}" | sed -E 's#^https?://github.com/##; s#\.git$##'
 }
 
+toml_string_array_from_csv() {
+  local csv="$1"
+  jq -rn --arg csv "${csv}" '
+    ($csv
+      | split(",")
+      | map(gsub("^\\s+|\\s+$"; ""))
+      | map(select(length > 0))) as $items
+    | "[" + ($items | map(@json) | join(", ")) + "]"
+  '
+}
+
+fetch_agent_authorized_keys() {
+  local base_url resp
+  base_url="$(trim_trailing_slash "${PLATFORM_BASE_URL}")"
+
+  if ! resp="$(curl -fsSL "${base_url}/api/agent/authorized-keys?api_key=${REGISTERED_API_KEY}")"; then
+    if ! resp="$(curl -fsSL "${base_url}/api/agent-auth-public-key")"; then
+      echo "[WARN] failed to fetch platform authorized keys; will keep fallback auth mode"
+      return 1
+    fi
+  fi
+
+  REGISTERED_AGENT_AUTH_KEYS="$({
+    echo "${resp}" | jq -r '
+      if (.authorized_keys | type) == "array" then
+        .authorized_keys[]?
+      else
+        .public_key // .data.public_key // empty
+      end
+    ' | paste -sd, -
+  } || true)"
+  if [[ -z "${REGISTERED_AGENT_AUTH_KEYS}" ]]; then
+    echo "[WARN] platform authorized keys missing from response; will keep fallback auth mode"
+    return 1
+  fi
+
+  echo "[INFO] fetched platform authorized keys"
+}
+
 install_from_release() {
   local arch="$1"
   local repo_path
@@ -224,9 +263,32 @@ register_robot() {
 write_agent_config() {
   mkdir -p "$(dirname "${AGENT_CONFIG_PATH}")"
 
+  local resolved_webrtc_robot_id
+  resolved_webrtc_robot_id="${WEBRTC_ROBOT_ID:-${REGISTERED_ROBOT_ID:-${AGENT_ID}}}"
+
+  local merged_authorized_keys
+  merged_authorized_keys="${AUTHORIZED_KEYS:-}"
+  if [[ -n "${REGISTERED_AGENT_AUTH_KEYS:-}" ]]; then
+    if [[ -n "${merged_authorized_keys// }" ]]; then
+      merged_authorized_keys="${merged_authorized_keys},${REGISTERED_AGENT_AUTH_KEYS}"
+    else
+      merged_authorized_keys="${REGISTERED_AGENT_AUTH_KEYS}"
+    fi
+  fi
+
+  local server_auth_block
+  if [[ -n "${merged_authorized_keys// }" ]]; then
+    local authorized_keys_toml
+    authorized_keys_toml="$(toml_string_array_from_csv "${merged_authorized_keys}")"
+    server_auth_block=$(printf 'authorized_keys = %s\ninsecure_allow_any_client = false' "${authorized_keys_toml}")
+  else
+    server_auth_block="insecure_allow_any_client = ${INSECURE_ALLOW_ANY_CLIENT}"
+  fi
+
   cat > "${AGENT_CONFIG_PATH}" <<CFG
 [server]
 listen_port = ${AGENT_LISTEN_PORT}
+${server_auth_block}
 
 [platform]
 api_url = "$(trim_trailing_slash "${PLATFORM_BASE_URL}")"
@@ -234,7 +296,7 @@ api_key = "${REGISTERED_API_KEY}"
 
 [webrtc]
 enabled = ${WEBRTC_ENABLED}
-robot_id = "${WEBRTC_ROBOT_ID}"
+robot_id = "${resolved_webrtc_robot_id}"
 stun_timeout_secs = ${WEBRTC_STUN_TIMEOUT_SECS}
 
 [heartbeat]
@@ -291,6 +353,8 @@ HEARTBEAT_INTERVAL_SECS="${HEARTBEAT_INTERVAL_SECS:-30}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
 WEBRTC_ENABLED="${WEBRTC_ENABLED:-true}"
 WEBRTC_STUN_TIMEOUT_SECS="${WEBRTC_STUN_TIMEOUT_SECS:-8}"
+AUTHORIZED_KEYS="${AUTHORIZED_KEYS:-}"
+INSECURE_ALLOW_ANY_CLIENT="${INSECURE_ALLOW_ANY_CLIENT:-true}"
 START_AGENT="${START_AGENT:-true}"
 AGENT_LOG_PATH="${AGENT_LOG_PATH:-$HOME/robotunnel-agent.log}"
 AGENT_PID_PATH="${AGENT_PID_PATH:-$HOME/robotunnel-agent.pid}"
@@ -306,7 +370,6 @@ require_var RT_KEY
 
 AGENT_ID="$(ensure_agent_id)"
 ROBOT_NAME="${ROBOT_NAME:-$(hostname -s 2>/dev/null || echo "${AGENT_ID}")}"
-WEBRTC_ROBOT_ID="${WEBRTC_ROBOT_ID:-$AGENT_ID}"
 ARCH="$(detect_arch)"
 
 # ---------- Install ----------
@@ -333,8 +396,10 @@ esac
 REGISTERED_API_KEY=""
 REGISTERED_ROBOT_ID=""
 REGISTERED_AGENT_ID=""
+REGISTERED_AGENT_AUTH_KEYS=""
 
 register_robot
+fetch_agent_authorized_keys || true
 write_agent_config
 start_agent
 

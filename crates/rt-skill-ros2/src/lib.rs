@@ -29,11 +29,17 @@ impl Skill for Ros2Skill {
     ) -> ExecutionResult {
         match _action {
             "list_topics" => Ok(serde_json::json!(["/cmd_vel", "/odom", "/scan", "/tf"])),
-            "topic_info" => Ok(
-                serde_json::json!({"topic": _params["topic"], "type": "geometry_msgs/msg/Twist"}),
-            ),
+            "topic_info" => Ok(serde_json::json!({
+                "topic": _params["topic"],
+                "type": "geometry_msgs/msg/Twist",
+                "bridge_url": self.bridge_url,
+            })),
             "subscribe" => {
-                Ok(serde_json::json!({"status": "mock_streaming", "topic": _params["topic"]}))
+                Ok(serde_json::json!({
+                    "status": "mock_streaming",
+                    "topic": _params["topic"],
+                    "bridge_url": self.bridge_url,
+                }))
             }
             _ => Err(SkillError::ActionNotFound(_action.to_string())),
         }

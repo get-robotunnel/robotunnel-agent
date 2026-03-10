@@ -10,6 +10,7 @@
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::RngCore;
+use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -33,14 +34,29 @@ pub enum AuthError {
 pub struct ServerAuthenticator {
     /// Set of authorized public keys (hex-encoded).
     /// If empty, any valid signature is accepted (for development/testing).
-    authorized_keys: Vec<String>,
+    authorized_keys: Arc<RwLock<Vec<String>>>,
 }
 
 impl ServerAuthenticator {
     /// Create a new authenticator.
     /// If `authorized_keys` is empty, any valid Ed25519 signature is accepted.
     pub fn new(authorized_keys: Vec<String>) -> Self {
-        Self { authorized_keys }
+        Self {
+            authorized_keys: Arc::new(RwLock::new(normalize_authorized_keys(authorized_keys))),
+        }
+    }
+
+    pub fn replace_authorized_keys(&self, authorized_keys: Vec<String>) {
+        if let Ok(mut guard) = self.authorized_keys.write() {
+            *guard = normalize_authorized_keys(authorized_keys);
+        }
+    }
+
+    pub fn authorized_keys(&self) -> Vec<String> {
+        self.authorized_keys
+            .read()
+            .map(|keys| keys.clone())
+            .unwrap_or_default()
     }
 
     /// Perform server-side authentication on a connected stream.
@@ -79,7 +95,8 @@ impl ServerAuthenticator {
         tracing::info!("auth: valid signature from key {}", &pub_key_hex[..16]);
 
         // 4. Check authorization
-        if !self.authorized_keys.is_empty() && !self.authorized_keys.contains(&pub_key_hex) {
+        let authorized_keys = self.authorized_keys();
+        if !authorized_keys.is_empty() && !authorized_keys.contains(&pub_key_hex) {
             tracing::warn!("auth: key {} not in authorized list", &pub_key_hex[..16]);
             // Send rejection byte
             stream.write_u8(0x00).await?;
@@ -161,6 +178,17 @@ mod hex {
             })
             .collect()
     }
+}
+
+fn normalize_authorized_keys(keys: Vec<String>) -> Vec<String> {
+    let mut normalized = keys
+        .into_iter()
+        .map(|key| key.trim().to_lowercase())
+        .filter(|key| !key.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 #[cfg(test)]

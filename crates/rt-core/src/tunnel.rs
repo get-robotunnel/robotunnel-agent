@@ -64,6 +64,14 @@ impl TunnelServer {
         self.client_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    pub fn replace_authorized_keys(&self, authorized_keys: Vec<String>) {
+        self.authenticator.replace_authorized_keys(authorized_keys);
+    }
+
+    pub fn authorized_keys(&self) -> Vec<String> {
+        self.authenticator.authorized_keys()
+    }
+
     /// Signal shutdown.
     pub fn shutdown(&self) {
         self.shutdown.notify_waiters();

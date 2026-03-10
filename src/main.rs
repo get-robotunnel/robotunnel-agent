@@ -11,10 +11,12 @@ mod interaction;
 
 use application::MonitorSettings;
 use clap::{Parser, Subcommand};
+use rt_core::authorized_keys::AuthorizedKeysSyncService;
 use rt_core::config::AgentConfig;
 use rt_core::heartbeat::HeartbeatService;
 use rt_core::tunnel::TunnelServer;
 use rt_llm::{LlmManager, Provider};
+use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tracing;
 use tracing_subscriber::{fmt, EnvFilter};
@@ -27,13 +29,8 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[command(about = "RoboTunnel Agent — The Physical World API Layer")]
 struct Args {
     /// Path to config file
-    #[arg(
-        short,
-        long,
-        default_value = "/etc/robotunnel/agent.toml",
-        global = true
-    )]
-    config: String,
+    #[arg(short, long, global = true)]
+    config: Option<String>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -85,6 +82,7 @@ enum MonitorAction {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let config_path = resolve_config_path(args.config);
 
     // Handle key management subcommands (no tunnel needed)
     if let Some(Command::Keys { action }) = args.command {
@@ -97,10 +95,10 @@ async fn main() -> anyhow::Result<()> {
     // --- Agent mode ---
 
     // Load configuration
-    let config = if std::path::Path::new(&args.config).exists() {
-        AgentConfig::load_with_env(&args.config)?
+    let config = if std::path::Path::new(&config_path).exists() {
+        AgentConfig::load_with_env(&config_path)?
     } else {
-        tracing::info!("config file not found at {}, using defaults", args.config);
+        eprintln!("[INFO] config file not found at {}, using defaults", config_path);
         let mut config = AgentConfig::default();
         config.apply_env_overrides();
         config.validate_security()?;
@@ -132,11 +130,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Build tunnel server
-    let tunnel_server = TunnelServer::new(
+    let tunnel_server = Arc::new(TunnelServer::new(
         config.server.listen_port,
         config.server.authorized_keys.clone(),
         cmd_tx.clone(),
-    );
+    ));
 
     let router = application::build_application_router(tunnel_server.broadcast_tx());
 
@@ -159,6 +157,23 @@ async fn main() -> anyhow::Result<()> {
         }))
     } else {
         tracing::warn!("no API key configured, heartbeat disabled");
+        None
+    };
+
+    let authorized_keys_handle = if let Some(api_key) = &config.platform.api_key {
+        let sync = AuthorizedKeysSyncService::new(
+            config.platform.api_url.clone(),
+            api_key.clone(),
+            config.heartbeat.interval_secs,
+            config.server.authorized_keys.clone(),
+        );
+        let shutdown_rx = shutdown_rx.clone();
+        let tunnel_server = tunnel_server.clone();
+        Some(tokio::spawn(async move {
+            sync.run(tunnel_server, shutdown_rx).await;
+        }))
+    } else {
+        tracing::warn!("no API key configured, authorized key sync disabled");
         None
     };
 
@@ -191,6 +206,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(handle) = heartbeat_handle {
         handle.abort();
     }
+    if let Some(handle) = authorized_keys_handle {
+        handle.abort();
+    }
     if let Some(handle) = monitor_handle {
         handle.abort();
     }
@@ -201,6 +219,28 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("agent shutdown complete");
     Ok(())
+}
+
+fn resolve_config_path(cli_path: Option<String>) -> String {
+    if let Some(path) = cli_path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) {
+        return path;
+    }
+
+    if let Ok(path) = std::env::var("RT_AGENT_CONFIG") {
+        let path = path.trim();
+        if !path.is_empty() {
+            return path.to_string();
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        let user_config = format!("{}/.config/robotunnel/agent.toml", home);
+        if std::path::Path::new(&user_config).exists() {
+            return user_config;
+        }
+    }
+
+    "/etc/robotunnel/agent.toml".to_string()
 }
 
 /// Handle `robotunnel-agent keys ...` subcommands.

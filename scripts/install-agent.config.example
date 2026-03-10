@@ -29,6 +29,12 @@ AGENT_CONFIG_PATH="$HOME/.config/robotunnel/agent.toml"
 AGENT_LISTEN_PORT="11411"
 HEARTBEAT_INTERVAL_SECS="30"
 LOG_LEVEL="info"
+# Comma-separated Ed25519 public keys allowed to connect to the local tunnel.
+# When left empty, the installer auto-fetches the platform gateway public key.
+# If that fetch fails, it falls back to insecure_allow_any_client=true for bootstrap convenience.
+AUTHORIZED_KEYS=""
+# Set to false after AUTHORIZED_KEYS is configured.
+INSECURE_ALLOW_ANY_CLIENT="true"
 WEBRTC_ENABLED="true"
 WEBRTC_ROBOT_ID=""
 WEBRTC_STUN_TIMEOUT_SECS="8"
@@ -37,3 +43,7 @@ WEBRTC_STUN_TIMEOUT_SECS="8"
 START_AGENT="true"
 AGENT_LOG_PATH="$HOME/robotunnel-agent.log"
 AGENT_PID_PATH="$HOME/robotunnel-agent.pid"
+
+# LLM API keys are not required during initial install.
+# Configure them later on the robot with:
+#   robotunnel-agent keys set <provider> "<api-key>"

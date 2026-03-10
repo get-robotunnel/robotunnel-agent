@@ -55,7 +55,10 @@ pub async fn connect(
             return Ok((dc, ConnectionType::Stun));
         }
         Err(e) => {
-            warn!("WebRTC STUN failed: {}. Fetching TURN credentials...", e);
+            warn!(
+                "WebRTC bootstrap before direct STUN completion failed: {}. Fetching TURN credentials...",
+                e
+            );
         }
     }
 
