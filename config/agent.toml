@@ -21,6 +21,9 @@ enabled = true
 # robot_id = "robot-sim-01"
 # STUN-only phase timeout before TURN fallback
 stun_timeout_secs = 8
+# Optional env override: RT_WEBRTC_IPV6_ENABLED=true
+# Default behavior is IPv4-only ICE gathering for better compatibility on
+# hosts with partial/broken IPv6 configuration.
 
 [heartbeat]
 # Heartbeat interval in seconds

@@ -195,6 +195,12 @@ This validates:
 2. `/api/turn-credentials`
 3. WebSocket upgrade on `/api/signal/:robot_id?role=agent`
 
+If your robot host has partial or broken IPv6 setup, keep the default IPv4-only ICE gathering. Only enable IPv6 when your network is known-good:
+
+```bash
+export RT_WEBRTC_IPV6_ENABLED=true
+```
+
 ---
 
 ## Setting Up LLM Keys

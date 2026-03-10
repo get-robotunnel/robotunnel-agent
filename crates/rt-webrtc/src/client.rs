@@ -16,9 +16,11 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 use webrtc::{
     api::{
-        interceptor_registry::register_default_interceptors, media_engine::MediaEngine, APIBuilder,
+        interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
+        setting_engine::SettingEngine, APIBuilder,
     },
     data_channel::RTCDataChannel,
+    ice::network_type::NetworkType,
     ice_transport::{
         ice_candidate::{RTCIceCandidate, RTCIceCandidateInit},
         ice_server::RTCIceServer,
@@ -106,11 +108,20 @@ async fn attempt_webrtc(
     on_message: Arc<dyn Fn(Vec<u8>) + Send + Sync>,
 ) -> Result<Arc<RTCDataChannel>> {
     // Build WebRTC API
+    let network_types = ice_network_types_from_env();
+    let mut setting_engine = SettingEngine::default();
+    setting_engine.set_network_types(network_types.clone());
+    info!(
+        "WebRTC: ICE network types = {}",
+        render_network_types(&network_types)
+    );
+
     let mut m = MediaEngine::default();
     m.register_default_codecs()?;
     let mut registry = Registry::new();
     registry = register_default_interceptors(registry, &mut m)?;
     let api = APIBuilder::new()
+        .with_setting_engine(setting_engine)
         .with_media_engine(m)
         .with_interceptor_registry(registry)
         .build();
@@ -279,4 +290,51 @@ async fn fetch_turn_credentials(cfg: &WebRtcConfig) -> Result<TurnCredentialResp
 
 fn log_stun_success() {
     info!("WebRTC: connected via STUN (direct P2P) — no relay bandwidth used");
+}
+
+fn ice_network_types_from_env() -> Vec<NetworkType> {
+    if env_flag_enabled("RT_WEBRTC_IPV6_ENABLED") {
+        return vec![NetworkType::Udp4, NetworkType::Udp6];
+    }
+    vec![NetworkType::Udp4]
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| parse_bool_like(&value))
+        .unwrap_or(false)
+}
+
+fn render_network_types(network_types: &[NetworkType]) -> String {
+    network_types
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn parse_bool_like(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_bool_like_true_values() {
+        assert!(parse_bool_like("true"));
+        assert!(parse_bool_like("1"));
+        assert!(parse_bool_like("YES"));
+    }
+
+    #[test]
+    fn test_parse_bool_like_false_values() {
+        assert!(!parse_bool_like("false"));
+        assert!(!parse_bool_like("0"));
+        assert!(!parse_bool_like("off"));
+    }
 }
