@@ -114,7 +114,7 @@ pub fn start_webrtc_bridge_if_enabled(
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "webrtc bootstrap failed (fallback tcp remains active): {}",
+                        "webrtc bootstrap failed (fallback tcp remains active): {:#}",
                         e
                     );
                     tokio::select! {
@@ -134,7 +134,7 @@ async fn resolve_robot_id_from_platform(api_url: &str, api_key: &str) -> Option<
             .as_deref()
             .and_then(normalize_robot_id),
         Err(err) => {
-            tracing::warn!("webrtc: failed to resolve robot_id from platform: {}", err);
+            tracing::warn!("webrtc: failed to resolve robot_id from platform: {:#}", err);
             None
         }
     }

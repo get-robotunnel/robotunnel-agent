@@ -180,6 +180,21 @@ ROBOT ID       IP              STATUS      CONNECTION   LAST SEEN
 robot-abc123   192.168.1.105   🟢 Online   STUN/P2P     Just now
 ```
 
+If WebRTC bootstrap fails and you want a fast control-plane check without rebuilding/restarting the agent, run:
+
+```bash
+./scripts/webrtc-preflight.sh \
+  --api-url "https://api.robotunnel.io" \
+  --api-key "rob_xxx" \
+  --robot-id "f4ad43ae-cdc5-4946-ae0f-246ddc73044f"
+```
+
+This validates:
+
+1. `/api/agent/authorized-keys`
+2. `/api/turn-credentials`
+3. WebSocket upgrade on `/api/signal/:robot_id?role=agent`
+
 ---
 
 ## Setting Up LLM Keys

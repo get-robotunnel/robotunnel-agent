@@ -56,7 +56,7 @@ pub async fn connect(
         }
         Err(e) => {
             warn!(
-                "WebRTC bootstrap before direct STUN completion failed: {}. Fetching TURN credentials...",
+                "WebRTC bootstrap before direct STUN completion failed: {:#}. Fetching TURN credentials...",
                 e
             );
         }
