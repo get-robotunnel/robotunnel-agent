@@ -17,6 +17,8 @@
 
 RoboTunnel Agent is a lightweight, open-source Rust agent that runs on your robot. It maintains secure connectivity to the RoboTunnel Platform and executes robot-side skills for remote debugging, proactive fleet monitoring, and natural-language control. LLM API keys are stored **encrypted on the robot only** and never transmitted to any server.
 
+`v0.3.0` is currently in private beta. Invited users can use the hosted product free during the beta period. Invited beta users become Founding Developers and will receive a lifetime discount when paid plans launch. The pricing direction after beta is expected to focus on connection resources, while the agent remains open source.
+
 ## Architecture
 
 ```
@@ -76,6 +78,12 @@ We built this for the robotics developer community. Trust is non-negotiable.
 - **Local-first LLM keys**: Your OpenAI, Claude, Gemini, and other API keys are stored in `~/.config/robotunnel/agent.keys`, encrypted with AES-256-GCM using a key derived from your machine ID. **These keys are never sent to our servers — not in transit, not in logs, not ever.** We are architecturally prevented from seeing them because we never receive them.
 - **Auditable**: This repository is the complete agent source. No binary blobs, no closed-source components.
 
+## Privacy & Data Handling
+
+- RoboTunnel does not persist your command text, LLM conversation content, raw sensor streams, or detailed robot state payloads by default.
+- The platform keeps only minimal operational metadata required for service operation, such as connection timing, invocation type, delivery metadata, and transport usage.
+- Discord and routing flows may transiently process content in order to execute requests, but the intended product stance is not to store that content as durable conversation history.
+
 > **For the skeptical developer**: Look at `crates/rt-llm/src/keystore.rs`. The LLM provider call is made directly from the agent process to the provider's API. The Platform Gateway is only in the path for session management, not inference.
 
 ---
@@ -96,7 +104,7 @@ We built this for the robotics developer community. Trust is non-negotiable.
 
 ### Step 1 — Get your token
 
-RoboTunnel is currently in developer-invite phase. Email [russellshe@gmail.com](mailto:russellshe@gmail.com) to receive your `RT_KEY`. Mention what you're building — we prioritize robotics and IoT developers.
+RoboTunnel is currently in private beta. Email [russellshe@gmail.com](mailto:russellshe@gmail.com) to receive your `RT_KEY`. Mention what you're building — we prioritize robotics and IoT developers.
 
 ### Step 2 — Install the CLI (your development machine)
 
@@ -130,6 +138,14 @@ On success you'll see:
 [INFO] Connection established via STUN (direct P2P)
 [INFO] Agent ready. Robot ID: robot-abc123
 ```
+
+The platform can also store robot identity metadata for chat surfaces:
+
+- `name`: primary display name such as `Spot-1`
+- `role`: optional short descriptor such as `picker`
+- `avatar_url`: optional Discord/web avatar image URL
+
+Discord uses this metadata to present robot-scoped replies as a concrete robot identity instead of a generic service response.
 
 ### Step 4 — Verify from your machine
 
@@ -277,6 +293,9 @@ rt monitor <robot_selector>
 rt compare Why is robot-3 moving slower than the others?
 rt test Confirm all robots can complete a pick-and-place cycle
 rt skill <robot_selector> <skill> <action> {"param":"value"}
+rt Why is robot-3 moving slower than the others?
+rt Raise the CPU alert threshold on robot-abc123 to 90 percent
+rt confirm
 rt alerts
 rt alerts here [robot_selector|all]
 rt alerts webhook <url> [robot_selector|all]
@@ -284,20 +303,31 @@ rt alerts off [robot_selector|all]
 rt alerts off webhook <url> [robot_selector|all]
 ```
 
+In Discord DMs you can also just chat naturally without the `rt` prefix. In server channels, mention the bot and then ask normally. The platform-side Discord intent router sees the available robots, the current robot context for that conversation, and the published skill contracts, then emits one structured skill call, one fleet orchestration request, one read-only robot metadata lookup, or one context update. It does not execute arbitrary shell text on its own. Risky actions such as `debug.shell` and `system config_set` still require an explicit `rt confirm`.
+
+The Discord interaction model now distinguishes between:
+
+- `platform chat`
+- `robot chat`
+- `fleet chat`
+
+Use `use <robot_selector>` to focus on one robot, `context` to inspect the current target, and `back` to return to platform chat. Compare/test responses automatically move the conversation into fleet context. In guild channels, RoboTunnel now opens a dedicated thread when a robot or fleet chat starts, so the target-scoped conversation continues there. The platform repository documents this model in `docs/interaction_layer.md`.
+
+Discord replies now include a strong target anchor such as `▶ Spot-1` at the top of each message. If the current target robot is offline, RoboTunnel reports that immediately with the last heartbeat timestamp instead of waiting for a skill timeout. If a fleet-scoped request is issued inside a robot-scoped conversation, RoboTunnel requires confirmation before expanding scope. Approval now works through Discord buttons as well as the text fallback `rt confirm` / `rt cancel`.
+
 ---
 
-## Subscription & Pricing
+## Beta & Pricing
 
-RoboTunnel charges for connection resources only. LLM inference, the agent software, and the open-source code are free.
+RoboTunnel is currently in private beta.
 
-| Plan | Price | Robots |
-|---|---|---|
-| Solo Developer | €19/mo | 3 robots |
-| Team | €49/mo | 15 robots |
+- Invited users are currently free during the beta period.
+- Invited beta users become `Founding Developers` and will receive a lifetime discount when paid plans launch.
+- Future pricing is expected to focus mainly on connection resources.
+- LLM inference is still bring-your-own-key.
+- The agent remains open source.
 
-Overage: connections are not cut. You get a 7-day grace period with dashboard/email notification to upgrade or reduce connections.
-
-**Contact [russellshe@gmail.com](mailto:russellshe@gmail.com) to subscribe.** Full pricing details at [robotunnel.io/pricing](https://robotunnel.io/pricing).
+**Contact [russellshe@gmail.com](mailto:russellshe@gmail.com) to join the beta.** Current rollout details are at [robotunnel.io/pricing](https://robotunnel.io/pricing).
 
 ---
 
