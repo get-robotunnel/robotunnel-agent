@@ -1,0 +1,39 @@
+# Example config for scripts/install-agent.sh
+# Usage:
+#   cp ./scripts/install-agent.config.example ./scripts/install-agent.config
+#   ./scripts/install-agent.sh ./scripts/install-agent.config
+
+# Required
+PLATFORM_BASE_URL="https://api.robotunnel.io"
+RT_KEY="rtk_replace_me"
+
+# Optional robot identity
+ROBOT_NAME="robot-lab-01"
+ROBOT_ROLE=""
+ROBOT_AVATAR_URL=""
+
+# Optional stable agent ID. Leave empty to derive from /etc/machine-id.
+AGENT_ID=""
+
+# Installation
+AGENT_REPO_URL="https://github.com/RussellTNY/robotunnel-agent.git"
+# auto | release | build
+AGENT_INSTALL_METHOD="auto"
+# latest or a specific tag such as v0.3.0
+AGENT_RELEASE_TAG="latest"
+INSTALL_BIN_DIR="$HOME/.local/bin"
+AGENT_WORKDIR="$HOME/robotunnel-agent"
+
+# Runtime config written by the script
+AGENT_CONFIG_PATH="$HOME/.config/robotunnel/agent.toml"
+AGENT_LISTEN_PORT="11411"
+HEARTBEAT_INTERVAL_SECS="30"
+LOG_LEVEL="info"
+WEBRTC_ENABLED="true"
+WEBRTC_ROBOT_ID=""
+WEBRTC_STUN_TIMEOUT_SECS="8"
+
+# Process management
+START_AGENT="true"
+AGENT_LOG_PATH="$HOME/robotunnel-agent.log"
+AGENT_PID_PATH="$HOME/robotunnel-agent.pid"

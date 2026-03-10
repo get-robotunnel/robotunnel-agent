@@ -93,7 +93,7 @@ We built this for the robotics developer community. Trust is non-negotiable.
 | Requirement | Version |
 |---|---|
 | OS | Ubuntu 20.04+ / Debian 11+ |
-| Rust | 1.75+ (stable) |
+| Rust | 1.75+ (stable, only if build-from-source fallback is used) |
 | ROS 2 *(optional)* | Humble / Iron / Jazzy |
 
 > **Note**: Linux is required for native ROS 2 integration. The agent compiles on macOS for development, but `rt-skill-ros2` requires a sourced ROS 2 environment.
@@ -120,15 +120,32 @@ curl -L https://github.com/RussellTNY/robotunnel/releases/latest/download/robotu
 chmod +x robotunnel && sudo mv robotunnel /usr/local/bin/
 ```
 
-### Step 3 — Build and launch the agent (on your robot)
+### Step 3 — Install, register, and launch the agent (on your robot)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RussellTNY/robotunnel-agent/main/scripts/install-agent.sh -o install-agent.sh
+curl -fsSL https://raw.githubusercontent.com/RussellTNY/robotunnel-agent/main/scripts/install-agent.config.example -o install-agent.config
+
+# Edit install-agent.config first:
+# - PLATFORM_BASE_URL
+# - RT_KEY
+# - ROBOT_NAME
+
+chmod +x install-agent.sh
+./install-agent.sh ./install-agent.config
+```
+
+The installer prefers the published GitHub release binary, falls back to `cargo build --release` when needed, registers the robot via `/api/register`, writes `~/.config/robotunnel/agent.toml`, and starts the agent in the background. The script source of truth lives in [`scripts/install-agent.sh`](./scripts/install-agent.sh).
+
+If you want to force a source-build fallback, still use the installer:
 
 ```bash
 git clone https://github.com/RussellTNY/robotunnel-agent.git
 cd robotunnel-agent
-cargo build --release
+cp ./scripts/install-agent.config.example ./scripts/install-agent.config
 
-# Start (replace with your actual key)
-RT_KEY="rt_your_key_here" ./target/release/robotunnel-agent
+# Edit ./scripts/install-agent.config first, then:
+AGENT_INSTALL_METHOD=build ./scripts/install-agent.sh ./scripts/install-agent.config
 ```
 
 On success you'll see:
@@ -207,6 +224,20 @@ For normal day-to-day use, remote monitor configuration should go through the st
 robotunnel skill robot-abc123 system config_get --params '{"section":"monitor"}'
 robotunnel skill robot-abc123 system config_set --params '{"section":"monitor","settings":{"enabled":true,"cpu_threshold_percent":85,"notify":"platform"}}'
 ```
+
+## Release Automation
+
+This repo now publishes agent binaries from Git tags through GitHub Actions.
+
+1. Update `Cargo.toml` to the release version.
+2. Push a matching tag such as `v0.3.1`.
+3. The `Release Agent` workflow builds and attaches:
+   - `robotunnel-agent-linux-amd64`
+   - `robotunnel-agent-darwin-amd64`
+   - `robotunnel-agent-darwin-arm64`
+   - `checksums.txt`
+
+If the tag version and `Cargo.toml` version do not match, the workflow fails early.
 
 ---
 
@@ -337,6 +368,7 @@ RoboTunnel is currently in private beta.
 |---|---|---|
 | v0.2.0 | ✅ Released | Ed25519 tunnel, debug skill, Kimi AI, Go platform |
 | v0.2.3 | ✅ Released | WebRTC P2P, multi-LLM local keys, proactive monitoring, fleet compare, acceptance testing |
+| v0.3.0 | 🚧 Shipping soon | Release binaries, install/register script, GitHub release automation |
 | v0.4.x | 📋 Planned | Skill Platform — publish your robot's capabilities for others to discover and use |
 
 ---

@@ -19,9 +19,11 @@ use tokio::sync::{mpsc, watch};
 use tracing;
 use tracing_subscriber::{fmt, EnvFilter};
 
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Parser, Debug)]
 #[command(name = "robotunnel-agent")]
-#[command(version = "0.3.0")]
+#[command(version = APP_VERSION)]
 #[command(about = "RoboTunnel Agent — The Physical World API Layer")]
 struct Args {
     /// Path to config file
@@ -110,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.logging.level));
     fmt().with_env_filter(filter).with_target(false).init();
 
-    tracing::info!("robotunnel-agent v0.3.0 starting");
+    tracing::info!("robotunnel-agent v{} starting", APP_VERSION);
 
     // Shutdown signal
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

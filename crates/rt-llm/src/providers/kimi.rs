@@ -49,7 +49,7 @@ pub async fn infer(api_key: &str, req: InferRequest) -> Result<String> {
     });
 
     let body = ChatRequest {
-        model: "moonshot-v1-8k".to_string(),
+        model: "kimi-latest".to_string(),
         messages,
         max_tokens: req.max_tokens,
     };

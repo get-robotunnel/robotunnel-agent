@@ -1,62 +1,70 @@
 //! xAI Grok provider.
-//! API docs: https://docs.x.ai/api (OpenAI-compatible)
+//! API docs: https://docs.x.ai/developers/model-capabilities/text/generate-text
 
 use crate::InferRequest;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-// Grok uses OpenAI-compatible API — same structs, different base URL and model.
 #[derive(Serialize)]
-struct ChatRequest {
+struct ResponsesRequest {
     model: String,
-    messages: Vec<Message>,
-    max_tokens: u32,
+    input: Vec<InputMessage>,
+    max_output_tokens: u32,
+    store: bool,
 }
 
 #[derive(Serialize)]
-struct Message {
+struct InputMessage {
     role: String,
     content: String,
 }
 
 #[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
+struct ResponsesResponse {
+    output: Vec<OutputItem>,
 }
 
 #[derive(Deserialize)]
-struct Choice {
-    message: MessageContent,
+struct OutputItem {
+    #[serde(rename = "type")]
+    item_type: String,
+    #[serde(default)]
+    content: Vec<OutputContent>,
 }
 
 #[derive(Deserialize)]
-struct MessageContent {
-    content: String,
+struct OutputContent {
+    #[serde(rename = "type")]
+    content_type: String,
+    text: Option<String>,
+    refusal: Option<String>,
 }
 
 pub async fn infer(api_key: &str, req: InferRequest) -> Result<String> {
     let client = reqwest::Client::new();
 
-    let mut messages = Vec::new();
+    let mut input = Vec::new();
     if let Some(system) = req.system {
-        messages.push(Message {
+        input.push(InputMessage {
             role: "system".into(),
             content: system,
         });
     }
-    messages.push(Message {
+    input.push(InputMessage {
         role: "user".into(),
         content: req.user,
     });
 
-    let body = ChatRequest {
-        model: "grok-3".to_string(),
-        messages,
-        max_tokens: req.max_tokens,
+    let body = ResponsesRequest {
+        model: "grok-4-fast-reasoning".to_string(),
+        input,
+        max_output_tokens: req.max_tokens,
+        // The product promise is local-first, so opt out of xAI server-side history.
+        store: false,
     };
 
     let resp = client
-        .post("https://api.x.ai/v1/chat/completions")
+        .post("https://api.x.ai/v1/responses")
         .bearer_auth(api_key)
         .json(&body)
         .send()
@@ -64,13 +72,76 @@ pub async fn infer(api_key: &str, req: InferRequest) -> Result<String> {
         .context("Grok API request failed")?
         .error_for_status()
         .context("Grok API error status")?
-        .json::<ChatResponse>()
+        .json::<ResponsesResponse>()
         .await
         .context("parsing Grok response")?;
 
-    resp.choices
-        .into_iter()
-        .next()
-        .map(|c| c.message.content)
-        .ok_or_else(|| anyhow::anyhow!("Grok returned no choices"))
+    extract_text(resp.output)
+}
+
+fn extract_text(output: Vec<OutputItem>) -> Result<String> {
+    let mut text_chunks = Vec::new();
+    let mut refusals = Vec::new();
+
+    for item in output {
+        if item.item_type != "message" {
+            continue;
+        }
+
+        for content in item.content {
+            match content.content_type.as_str() {
+                "output_text" => {
+                    if let Some(text) = content.text {
+                        text_chunks.push(text);
+                    }
+                }
+                "refusal" => {
+                    if let Some(refusal) = content.refusal {
+                        refusals.push(refusal);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !text_chunks.is_empty() {
+        return Ok(text_chunks.join("\n"));
+    }
+
+    if !refusals.is_empty() {
+        return Ok(refusals.join("\n"));
+    }
+
+    anyhow::bail!("Grok returned no text output")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_text, ResponsesResponse};
+
+    #[test]
+    fn extracts_output_text_from_responses_api_shape() {
+        let payload = r#"{
+          "output": [
+            {
+              "type": "reasoning",
+              "content": []
+            },
+            {
+              "type": "message",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "hello from grok"
+                }
+              ]
+            }
+          ]
+        }"#;
+
+        let resp: ResponsesResponse = serde_json::from_str(payload).unwrap();
+        let text = extract_text(resp.output).unwrap();
+        assert_eq!(text, "hello from grok");
+    }
 }

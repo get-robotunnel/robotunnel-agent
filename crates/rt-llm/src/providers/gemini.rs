@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize)]
 struct GenerateRequest {
     contents: Vec<Content>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_instruction: Option<SystemInstruction>,
     #[serde(rename = "generationConfig")]
     generation_config: GenerationConfig,
 }
@@ -21,6 +23,11 @@ struct Content {
 #[derive(Serialize)]
 struct Part {
     text: String,
+}
+
+#[derive(Serialize)]
+struct SystemInstruction {
+    parts: Vec<Part>,
 }
 
 #[derive(Serialize)]
@@ -51,36 +58,22 @@ struct PartResponse {
 
 pub async fn infer(api_key: &str, req: InferRequest) -> Result<String> {
     let client = reqwest::Client::new();
-    let model = "gemini-2.0-flash";
+    let model = "gemini-2.5-flash";
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
         model, api_key
     );
 
-    let mut contents = Vec::new();
-    // Gemini uses "user" role for user messages; system instructions go in system_instruction field
-    // For simplicity, prepend system prompt as a user message if present
-    if let Some(system) = &req.system {
-        contents.push(Content {
-            role: "user".into(),
-            parts: vec![Part {
-                text: format!("[System]: {}", system),
-            }],
-        });
-        contents.push(Content {
-            role: "model".into(),
-            parts: vec![Part {
-                text: "Understood.".into(),
-            }],
-        });
-    }
-    contents.push(Content {
+    let contents = vec![Content {
         role: "user".into(),
         parts: vec![Part { text: req.user }],
-    });
+    }];
 
     let body = GenerateRequest {
         contents,
+        system_instruction: req.system.map(|system| SystemInstruction {
+            parts: vec![Part { text: system }],
+        }),
         generation_config: GenerationConfig {
             max_output_tokens: req.max_tokens,
         },
