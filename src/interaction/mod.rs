@@ -41,8 +41,7 @@ pub fn start_webrtc_bridge_if_enabled(
         .robot_id
         .clone()
         .or_else(|| std::env::var("RT_ROBOT_ID").ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+        .and_then(|value| normalize_robot_id(&value));
     let platform_api_url = config.platform.api_url.clone();
     let platform_ws_url = to_ws_base_url(&platform_api_url);
     let stun_timeout_secs = config.webrtc.stun_timeout_secs;
@@ -130,12 +129,23 @@ pub fn start_webrtc_bridge_if_enabled(
 
 async fn resolve_robot_id_from_platform(api_url: &str, api_key: &str) -> Option<String> {
     match fetch_agent_bootstrap(api_url, api_key).await {
-        Ok(bootstrap) => bootstrap.robot_id,
+        Ok(bootstrap) => bootstrap
+            .robot_id
+            .as_deref()
+            .and_then(normalize_robot_id),
         Err(err) => {
             tracing::warn!("webrtc: failed to resolve robot_id from platform: {}", err);
             None
         }
     }
+}
+
+fn normalize_robot_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("unknown") {
+        return None;
+    }
+    Some(value.to_string())
 }
 
 fn log_webrtc_connected(conn_type: &ConnectionType) {
