@@ -4,8 +4,11 @@
 #   ./scripts/install-agent.sh ./scripts/install-agent.config
 
 # Required
-PLATFORM_BASE_URL="https://api.robotunnel.io"
 RT_KEY="rtk_replace_me"
+
+# Optional: defaults to https://api.robotunnel.io
+# Set this only when using a self-hosted platform API.
+PLATFORM_BASE_URL="https://api.robotunnel.io"
 
 # Optional robot identity
 ROBOT_NAME="robot-lab-01"

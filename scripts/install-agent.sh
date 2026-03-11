@@ -342,6 +342,7 @@ start_agent() {
 }
 
 # ---------- Defaults ----------
+PLATFORM_BASE_URL="${PLATFORM_BASE_URL:-https://api.robotunnel.io}"
 AGENT_REPO_URL="${AGENT_REPO_URL:-https://github.com/RussellTNY/robotunnel-agent.git}"
 AGENT_INSTALL_METHOD="${AGENT_INSTALL_METHOD:-auto}"
 AGENT_RELEASE_TAG="${AGENT_RELEASE_TAG:-latest}"
@@ -365,7 +366,6 @@ ROBOT_AVATAR_URL="${ROBOT_AVATAR_URL:-}"
 require_cmd curl
 require_cmd jq
 require_cmd install
-require_var PLATFORM_BASE_URL
 require_var RT_KEY
 
 AGENT_ID="$(ensure_agent_id)"

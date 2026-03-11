@@ -136,9 +136,9 @@ curl -fsSL https://raw.githubusercontent.com/RussellTNY/robotunnel-agent/main/sc
 curl -fsSL https://raw.githubusercontent.com/RussellTNY/robotunnel-agent/main/scripts/install-agent.config.example -o install-agent.config
 
 # Edit install-agent.config first:
-# - PLATFORM_BASE_URL
 # - RT_KEY
-# - ROBOT_NAME
+# - ROBOT_NAME (optional; defaults to hostname)
+# - PLATFORM_BASE_URL (optional; only for self-hosted platform)
 
 chmod +x install-agent.sh
 ./install-agent.sh ./install-agent.config
@@ -156,7 +156,7 @@ git clone https://github.com/RussellTNY/robotunnel-agent.git
 cd robotunnel-agent
 cp ./scripts/install-agent.config.example ./scripts/install-agent.config
 
-# Edit ./scripts/install-agent.config first, then:
+# Edit ./scripts/install-agent.config first (RT_KEY required), then:
 AGENT_INSTALL_METHOD=build ./scripts/install-agent.sh ./scripts/install-agent.config
 ```
 
