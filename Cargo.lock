@@ -1989,6 +1989,7 @@ name = "rt-skill-monitor"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "libc",
  "reqwest",
  "rt-core",
  "rt-llm",
