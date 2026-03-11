@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use futures::{SinkExt, StreamExt};
-use serde_json::Value;
+// use serde_json::Value; // Removed unused
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
@@ -44,8 +44,10 @@ pub async fn connect(
     cfg: &WebRtcConfig,
     on_message: Arc<dyn Fn(Vec<u8>) + Send + Sync>,
 ) -> Result<(Arc<RTCDataChannel>, ConnectionType)> {
+    let id = cfg.bootstrap_id.as_deref().unwrap_or("none");
     // Phase 1: attempt STUN-only
-    info!("WebRTC: attempting STUN (direct P2P)...");
+    info!("[BOOTSTRAP:{}] WebRTC: attempting STUN (direct P2P)...", id);
+    log_phase(cfg, BootstrapPhase::StunStart, None);
     let stun_ice_servers = vec![RTCIceServer {
         urls: vec!["stun:stun.l.google.com:19302".to_string()],
         ..Default::default()
@@ -57,6 +59,7 @@ pub async fn connect(
             return Ok((dc, ConnectionType::Stun));
         }
         Err(e) => {
+            log_phase(cfg, BootstrapPhase::StunTimeout, Some(&e.to_string()));
             warn!(
                 "WebRTC bootstrap before direct STUN completion failed: {:#}. Fetching TURN credentials...",
                 e
@@ -114,7 +117,7 @@ pub async fn connect(
         .await
         .context("WebRTC failed with both STUN and TURN")?;
 
-    info!("WebRTC: connected via TURN relay");
+    info!("[BOOTSTRAP:{}] WebRTC: connected via TURN relay", id);
     Ok((dc, ConnectionType::Turn))
 }
 
@@ -124,6 +127,7 @@ async fn attempt_webrtc(
     ice_servers: Vec<RTCIceServer>,
     on_message: Arc<dyn Fn(Vec<u8>) + Send + Sync>,
 ) -> Result<Arc<RTCDataChannel>> {
+    let cfg_clone = cfg.clone();
     // Build WebRTC API
     let network_types = ice_network_types_from_env();
     let mut setting_engine = SettingEngine::default();
@@ -165,11 +169,17 @@ async fn attempt_webrtc(
     }
 
     // Connect to signaling server
-    let sig_url = cfg.signaling_url();
+    let sig_url = cfg_clone.signaling_url();
     debug!("WebRTC: connecting to signaling server: {}", sig_url);
+    log_phase(&cfg_clone, BootstrapPhase::SignalWsConnectStart, None);
     let (ws_stream, _) = connect_async(&sig_url)
         .await
-        .context("signaling WebSocket connect failed")?;
+        .with_context(|| {
+            let err_msg = format!("signaling WebSocket connect failed (url={})", sig_url);
+            log_phase(&cfg_clone, BootstrapPhase::SignalWsConnectFail, Some(&err_msg));
+            err_msg
+        })?;
+    log_phase(&cfg_clone, BootstrapPhase::SignalWsConnectOk, None);
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
     // Collect local ICE candidates to send after offer
@@ -196,11 +206,13 @@ async fn attempt_webrtc(
         r#type: "offer".to_string(),
         payload: Some(serde_json::to_value(&offer)?),
         robot_id: cfg.robot_id.clone(),
+        bootstrap_id: cfg.bootstrap_id.clone(),
     };
     ws_tx
         .send(Message::Text(serde_json::to_string(&offer_msg)?.into()))
         .await?;
     debug!("WebRTC: sent SDP offer");
+    log_phase(&cfg_clone, BootstrapPhase::OfferSent, None);
 
     // Wait for answer + ICE candidates (with timeout)
     let connect_timeout = Duration::from_secs(cfg.stun_timeout_secs.max(10));
@@ -209,11 +221,14 @@ async fn attempt_webrtc(
 
     {
         let ctx = Arc::new(connected_tx);
+        let cfg_clone2 = cfg_clone.clone();
         pc.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
             let ctx = ctx.clone();
+            let cfg_phase = cfg_clone2.clone();
             Box::pin(async move {
                 match s {
                     RTCPeerConnectionState::Connected => {
+                        log_phase(&cfg_phase, BootstrapPhase::StunConnected, None);
                         if let Ok(mut guard) = ctx.lock() {
                             if let Some(tx) = guard.take() {
                                 let _ = tx.send(Ok(()));
@@ -235,7 +250,7 @@ async fn attempt_webrtc(
 
     // Signal exchange loop in background
     let pc_clone = pc.clone();
-    let robot_id = cfg.robot_id.clone();
+    let cfg_signaling = cfg_clone.clone();
     tokio::spawn(async move {
         // Forward local ICE candidates to remote
         loop {
@@ -243,8 +258,9 @@ async fn attempt_webrtc(
                 Some(candidate) = ice_rx.recv() => {
                     let msg = SignalMessage {
                         r#type: "ice-candidate".to_string(),
-                        payload: Some(serde_json::to_value(&candidate).unwrap_or(Value::Null)),
-                        robot_id: robot_id.clone(),
+                        payload: Some(serde_json::to_value(&candidate).unwrap_or(serde_json::Value::Null)),
+                        robot_id: cfg_signaling.robot_id.clone(),
+                        bootstrap_id: cfg_signaling.bootstrap_id.clone(),
                     };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = ws_tx.send(Message::Text(json.into())).await;
@@ -259,6 +275,7 @@ async fn attempt_webrtc(
                                         if let Ok(answer) = serde_json::from_value::<RTCSessionDescription>(payload) {
                                             let _ = pc_clone.set_remote_description(answer).await;
                                             debug!("WebRTC: remote answer set");
+                                            log_phase(&cfg_signaling, BootstrapPhase::AnswerReceived, None);
                                         }
                                     }
                                 }
@@ -282,28 +299,62 @@ async fn attempt_webrtc(
 
     // Wait for connection with timeout
     match timeout(connect_timeout, connected_rx).await {
-        Ok(Ok(Ok(()))) => Ok(dc),
+        Ok(Ok(Ok(()))) => {
+            log_phase(cfg, BootstrapPhase::DataChannelOpen, None);
+            Ok(dc)
+        }
         Ok(Ok(Err(e))) => bail!("WebRTC connection failed: {}", e),
         Ok(Err(_)) => bail!("Connection state channel dropped"),
-        Err(_) => bail!("WebRTC ICE timeout ({}s)", connect_timeout.as_secs()),
+        Err(_) => {
+            log_phase(&cfg_clone, BootstrapPhase::StunTimeout, None);
+            bail!("WebRTC ICE timeout ({}s)", connect_timeout.as_secs());
+        }
     }
 }
 
 /// Fetch TURN credentials from the platform.
 async fn fetch_turn_credentials(cfg: &WebRtcConfig) -> Result<TurnCredentialResponse> {
+    log_phase(cfg, BootstrapPhase::TurnFetchStart, None);
     let client = reqwest::Client::new();
     let url = cfg.turn_credentials_url();
     let resp = client
         .get(&url)
         .send()
         .await
-        .with_context(|| format!("fetching TURN credentials from {}", url))?
-        .error_for_status()
-        .context("TURN credentials endpoint error")?
+        .with_context(|| {
+            let err_msg = format!("HTTP transport error fetching TURN credentials from {}", url);
+            log_phase(cfg, BootstrapPhase::TurnFetchFail, Some(&err_msg));
+            err_msg
+        })?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_else(|_| "no body".to_string());
+        let err_msg = format!("TURN credentials API returned {}: {}", status, body);
+        log_phase(cfg, BootstrapPhase::TurnFetchFail, Some(&err_msg));
+        bail!(err_msg);
+    }
+
+    let payload = resp
         .json::<TurnCredentialResponse>()
         .await
-        .context("parsing TURN credentials")?;
-    Ok(resp)
+        .with_context(|| {
+            let err_msg = "failed to parse TURN credentials JSON";
+            log_phase(cfg, BootstrapPhase::TurnFetchFail, Some(err_msg));
+            err_msg
+        })?;
+
+    log_phase(cfg, BootstrapPhase::TurnFetchOk, None);
+    Ok(payload)
+}
+
+fn log_phase(cfg: &WebRtcConfig, phase: BootstrapPhase, detail: Option<&str>) {
+    let id = cfg.bootstrap_id.as_deref().unwrap_or("none");
+    if let Some(d) = detail {
+        warn!("[BOOTSTRAP:{}] {} - {}", id, phase.as_str(), d);
+    } else {
+        info!("[BOOTSTRAP:{}] {}", id, phase.as_str());
+    }
 }
 
 fn log_stun_success() {

@@ -116,6 +116,14 @@ pub struct CommandResponse {
     pub error: Option<String>,
 }
 
+/// JSON payload for WebRtcBootstrap frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebRtcBootstrapPayload {
+    pub bootstrap_id: String,
+    pub cli_public_ip: Option<String>,
+    pub cli_lan_cidr: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum CommandStatus {
@@ -138,6 +146,10 @@ pub enum FrameType {
     /// Ping/pong for keepalive
     Ping = 0x10,
     Pong = 0x11,
+    /// Trigger WebRTC bootstrap (Platform -> Agent)
+    WebRtcBootstrap = 0x20,
+    /// Terminate WebRTC resources (Platform -> Agent)
+    WebRtcTeardown = 0x21,
 }
 
 impl TryFrom<u8> for FrameType {
@@ -150,6 +162,8 @@ impl TryFrom<u8> for FrameType {
             0x03 => Ok(FrameType::CommandResponse),
             0x10 => Ok(FrameType::Ping),
             0x11 => Ok(FrameType::Pong),
+            0x20 => Ok(FrameType::WebRtcBootstrap),
+            0x21 => Ok(FrameType::WebRtcTeardown),
             _ => Err(ProtocolError::InvalidPacket(format!(
                 "unknown frame type: 0x{:02x}",
                 value

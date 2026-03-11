@@ -19,6 +19,8 @@ use webrtc::data_channel::RTCDataChannel;
 pub fn start_webrtc_bridge_if_enabled(
     config: &AgentConfig,
     command_tx: mpsc::Sender<IncomingCommand>,
+    mut webrtc_trigger_rx: mpsc::Receiver<rt_core::protocol::WebRtcBootstrapPayload>,
+    mut webrtc_teardown_rx: mpsc::Receiver<()>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
     if !config.webrtc.enabled {
@@ -57,6 +59,21 @@ pub fn start_webrtc_bridge_if_enabled(
                 resolved_robot_id = resolve_robot_id_from_platform(&platform_api_url, &api_key).await;
             }
 
+            // On-demand: wait for trigger from platform over TCP tunnel
+            let payload = tokio::select! {
+                Some(p) = webrtc_trigger_rx.recv() => {
+                    tracing::info!("[BOOTSTRAP:{}] webrtc: received trigger signal, starting bootstrap", p.bootstrap_id);
+                    p
+                }
+                _ = shutdown_rx.changed() => { break; }
+            };
+
+            let bootstrap_id = payload.bootstrap_id.clone();
+            // TODO: Use payload.cli_public_ip / cli_lan_cidr for routing decisions (LAN bypass)
+            if let (Some(cli_ip), Some(cli_cidr)) = (&payload.cli_public_ip, &payload.cli_lan_cidr) {
+                 tracing::info!("[BOOTSTRAP:{}] CLI Info: PublicIP={}, LAN={}", bootstrap_id, cli_ip, cli_cidr);
+            }
+
             let robot_id = match resolved_robot_id.clone() {
                 Some(value) => value,
                 None => {
@@ -71,58 +88,91 @@ pub fn start_webrtc_bridge_if_enabled(
                 }
             };
 
-            let cfg = WebRtcConfig {
-                platform_url: platform_ws_url.clone(),
-                robot_id,
-                api_key: api_key.clone(),
-                stun_timeout_secs,
-            };
-
             let (dc_payload_tx, mut dc_payload_rx) = mpsc::channel::<Vec<u8>>(256);
-            tracing::info!("webrtc: attempting bootstrap for robot_id={}", cfg.robot_id);
             let on_message = Arc::new(move |payload: Vec<u8>| {
                 let _ = dc_payload_tx.try_send(payload);
             });
 
-            match rt_webrtc::client::connect(&cfg, on_message).await {
-                Ok((dc, conn_type)) => {
-                    log_webrtc_connected(&conn_type);
-                    let (dc_closed_tx, mut dc_closed_rx) = mpsc::channel::<()>(1);
-                    dc.on_close(Box::new(move || {
-                        let _ = dc_closed_tx.try_send(());
-                        Box::pin(async {})
-                    }));
+            // Reconnection loop (allows one retry)
+            let mut attempts = 0;
+            const MAX_RETRY: usize = 1;
 
-                    loop {
-                        tokio::select! {
-                            Some(payload) = dc_payload_rx.recv() => {
-                                handle_webrtc_payload(payload, &command_tx, &dc).await;
-                            }
-                            Some(_) = dc_closed_rx.recv() => {
-                                tracing::warn!("webrtc datachannel closed; will reconnect");
-                                break;
-                            }
-                            _ = shutdown_rx.changed() => {
-                                break;
+            loop {
+                let cfg = WebRtcConfig {
+                    platform_url: platform_ws_url.clone(),
+                    robot_id: robot_id.clone(),
+                    api_key: api_key.clone(),
+                    stun_timeout_secs,
+                    bootstrap_id: Some(bootstrap_id.clone()),
+                };
+
+                tracing::info!(
+                    "[BOOTSTRAP:{}] webrtc: attempting bootstrap (attempt {})",
+                    bootstrap_id,
+                    attempts + 1
+                );
+                
+                match rt_webrtc::client::connect(&cfg, on_message.clone()).await {
+                    Ok((dc, conn_type)) => {
+                        log_webrtc_connected(&conn_type);
+                        
+                        let (dc_closed_tx, mut dc_closed_rx) = mpsc::channel::<()>(1);
+                        dc.on_close(Box::new(move || {
+                            let _ = dc_closed_tx.try_send(());
+                            Box::pin(async {})
+                        }));
+
+                        let mut is_teardown = false;
+                        loop {
+                            tokio::select! {
+                                Some(p) = dc_payload_rx.recv() => {
+                                    handle_webrtc_payload(p, &command_tx, &dc).await;
+                                }
+                                Some(_) = dc_closed_rx.recv() => {
+                                    tracing::warn!("[BOOTSTRAP:{}] webrtc datachannel closed", bootstrap_id);
+                                    break;
+                                }
+                                Some(_) = webrtc_teardown_rx.recv() => {
+                                    tracing::info!("[BOOTSTRAP:{}] webrtc: received teardown signal, closing", bootstrap_id);
+                                    is_teardown = true;
+                                    break;
+                                }
+                                _ = shutdown_rx.changed() => {
+                                    break;
+                                }
                             }
                         }
-                    }
 
-                    if *shutdown_rx.borrow() {
+                        if *shutdown_rx.borrow() || is_teardown {
+                            break; // Exit connection loop
+                        }
+
+                        // Unexpected close: try auto-reconnect once
+                        if attempts < MAX_RETRY {
+                            attempts += 1;
+                            tracing::info!("[BOOTSTRAP:{}] connection dropped; attempting auto-reconnect...", bootstrap_id);
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
+                        break; 
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "[BOOTSTRAP:{}] webrtc bootstrap failed: {:#}",
+                            bootstrap_id,
+                            e
+                        );
+                        if attempts < MAX_RETRY {
+                            attempts += 1;
+                            tracing::info!("[BOOTSTRAP:{}] retrying webrtc bootstrap...", bootstrap_id);
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
                         break;
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "webrtc bootstrap failed (fallback tcp remains active): {:#}",
-                        e
-                    );
-                    tokio::select! {
-                        _ = sleep(Duration::from_secs(20)) => {}
-                        _ = shutdown_rx.changed() => { break; }
-                    }
-                }
             }
+            tracing::info!("[BOOTSTRAP:{}] ending bootstrap session; waiting for trigger...", bootstrap_id);
         }
     }))
 }

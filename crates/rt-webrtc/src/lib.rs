@@ -59,25 +59,35 @@ pub struct WebRtcConfig {
     pub api_key: String,
     /// ICE gathering timeout before falling back to TURN (seconds)
     pub stun_timeout_secs: u64,
+    /// Optional trace ID to correlate logs across Agent/Platform/CLI
+    pub bootstrap_id: Option<String>,
 }
 
 impl WebRtcConfig {
     pub fn signaling_url(&self) -> String {
-        format!(
+        let mut url = format!(
             "{}/api/signal/{}?role=agent&api_key={}",
             self.signaling_base_url(),
             self.robot_id,
             self.api_key
-        )
+        );
+        if let Some(id) = &self.bootstrap_id {
+            url.push_str(&format!("&bootstrap_id={}", id));
+        }
+        url
     }
 
     pub fn turn_credentials_url(&self) -> String {
-        format!(
+        let mut url = format!(
             "{}/api/turn-credentials?api_key={}&robot_id={}",
             self.http_base_url(),
             self.api_key,
             self.robot_id
-        )
+        );
+        if let Some(id) = &self.bootstrap_id {
+            url.push_str(&format!("&bootstrap_id={}", id));
+        }
+        url
     }
 
     fn signaling_base_url(&self) -> String {
@@ -118,6 +128,7 @@ mod tests {
             robot_id: "robot-123".to_string(),
             api_key: "rob_test".to_string(),
             stun_timeout_secs: 8,
+            bootstrap_id: None,
         }
     }
 

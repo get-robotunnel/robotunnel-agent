@@ -34,6 +34,10 @@ pub struct TunnelServer {
     shutdown: Arc<tokio::sync::Notify>,
     /// Connected client count.
     client_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// Optional channel to trigger WebRTC bootstrap with payload.
+    webrtc_trigger: Option<mpsc::Sender<crate::protocol::WebRtcBootstrapPayload>>,
+    /// Optional channel to trigger WebRTC teardown.
+    webrtc_teardown: Option<mpsc::Sender<()>>,
 }
 
 impl TunnelServer {
@@ -51,7 +55,17 @@ impl TunnelServer {
             broadcast_tx,
             shutdown: Arc::new(tokio::sync::Notify::new()),
             client_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            webrtc_trigger: None,
+            webrtc_teardown: None,
         }
+    }
+
+    pub fn set_webrtc_trigger(&mut self, tx: mpsc::Sender<crate::protocol::WebRtcBootstrapPayload>) {
+        self.webrtc_trigger = Some(tx);
+    }
+
+    pub fn set_webrtc_teardown(&mut self, tx: mpsc::Sender<()>) {
+        self.webrtc_teardown = Some(tx);
     }
 
     /// Get the broadcast sender for publishing data to all clients.
@@ -93,6 +107,8 @@ impl TunnelServer {
                             let broadcast_rx = self.broadcast_tx.subscribe();
                             let client_count = self.client_count.clone();
                             let shutdown = self.shutdown.clone();
+                            let webrtc_trigger = self.webrtc_trigger.clone();
+                            let webrtc_teardown = self.webrtc_teardown.clone();
 
                             tokio::spawn(async move {
                                 client_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -102,6 +118,8 @@ impl TunnelServer {
                                     command_tx,
                                     broadcast_rx,
                                     shutdown,
+                                    webrtc_trigger,
+                                    webrtc_teardown,
                                 ).await {
                                     tracing::warn!("tunnel: client {} disconnected: {}", addr, e);
                                 }
@@ -132,6 +150,8 @@ async fn handle_client<S>(
     command_tx: mpsc::Sender<IncomingCommand>,
     mut broadcast_rx: broadcast::Receiver<Vec<u8>>,
     shutdown: Arc<tokio::sync::Notify>,
+    webrtc_trigger: Option<mpsc::Sender<crate::protocol::WebRtcBootstrapPayload>>,
+    webrtc_teardown: Option<mpsc::Sender<()>>,
 ) -> Result<(), ProtocolError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -202,6 +222,22 @@ where
                             FrameType::Ping => {
                                 let mut w = writer.lock().await;
                                 write_frame(&mut *w, FrameType::Pong, &[]).await?;
+                            }
+                            FrameType::WebRtcBootstrap => {
+                                if let Some(tx) = &webrtc_trigger {
+                                    if let Ok(payload) = serde_json::from_slice::<crate::protocol::WebRtcBootstrapPayload>(&data) {
+                                        let _ = tx.try_send(payload);
+                                        tracing::info!("tunnel: received WebRtcBootstrap trigger");
+                                    } else {
+                                        tracing::warn!("tunnel: invalid WebRtcBootstrap payload");
+                                    }
+                                }
+                            }
+                            FrameType::WebRtcTeardown => {
+                                if let Some(tx) = &webrtc_teardown {
+                                    let _ = tx.try_send(());
+                                    tracing::info!("tunnel: received WebRtcTeardown trigger");
+                                }
                             }
                             _ => {
                                 tracing::debug!("tunnel: ignoring frame type {:?}", frame_type);

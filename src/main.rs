@@ -130,11 +130,19 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Build tunnel server
-    let tunnel_server = Arc::new(TunnelServer::new(
+    let mut tunnel_server = TunnelServer::new(
         config.server.listen_port,
         config.server.authorized_keys.clone(),
         cmd_tx.clone(),
-    ));
+    );
+
+    let (webrtc_trigger_tx, webrtc_trigger_rx) = mpsc::channel(1);
+    let (webrtc_teardown_tx, webrtc_teardown_rx) = mpsc::channel(1);
+    if config.webrtc.enabled {
+        tunnel_server.set_webrtc_trigger(webrtc_trigger_tx);
+        tunnel_server.set_webrtc_teardown(webrtc_teardown_tx);
+    }
+    let tunnel_server = Arc::new(tunnel_server);
 
     let router = application::build_application_router(tunnel_server.broadcast_tx());
 
@@ -177,8 +185,13 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let webrtc_handle =
-        interaction::start_webrtc_bridge_if_enabled(&config, cmd_tx.clone(), shutdown_rx.clone());
+    let webrtc_handle = interaction::start_webrtc_bridge_if_enabled(
+        &config,
+        cmd_tx.clone(),
+        webrtc_trigger_rx,
+        webrtc_teardown_rx,
+        shutdown_rx.clone(),
+    );
 
     // Spawn router
     let router_handle = tokio::spawn(async move {

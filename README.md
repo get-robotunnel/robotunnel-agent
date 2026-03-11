@@ -49,7 +49,7 @@ RoboTunnel Agent is a lightweight, open-source Rust agent that runs on your robo
    └─────────────┘
 ```
 
-**Connection strategy**: Direct P2P via STUN when possible (no relay, zero server cost). TURN relay only as fallback. Always falls back to TCP tunnel if WebRTC fails. No single point of failure.
+**Connection strategy**: On-demand WebRTC bootstrap triggered by the platform when a CLI client connects. Direct P2P via STUN when possible (no relay, zero server cost). TURN relay only as fallback. Always falls back to TCP tunnel if WebRTC fails. Resources are automatically released via `WebRtcTeardown` signals when clients disconnect.
 
 ---
 
@@ -77,6 +77,15 @@ We built this for the robotics developer community. Trust is non-negotiable.
 - **Robot-side execution stays local**: Connectivity is authenticated with Ed25519, and robot logic plus LLM calls stay on-device. The current transport stack uses WebRTC when available and authenticated TCP compatibility paths where needed.
 - **Local-first LLM keys**: Your OpenAI, Claude, Gemini, and other API keys are stored in `~/.config/robotunnel/agent.keys`, encrypted with AES-256-GCM using a key derived from your machine ID. **These keys are never sent to our servers — not in transit, not in logs, not ever.** We are architecturally prevented from seeing them because we never receive them.
 - **Auditable**: This repository is the complete agent source. No binary blobs, no closed-source components.
+
+## Observability & Tracing (v0.3.x)
+
+RoboTunnel `v0.3.x` introduces cross-host tracing for the connection layer:
+
+- **Unified `bootstrap_id`**: Every connection attempt generates a unique UUID (propagated through signaling and platform logs) to simplify debugging across Agent/Platform/CLI boundaries.
+- **Phase-Level Logging**: Agent logs now explicitly report phases (`STUN_START`, `SIGNAL_WS_CONNECT`, `OFFER_SENT`, `DATACHANNEL_OPEN`, etc.).
+- **On-Demand Lifecycle**: To reduce background noise, WebRTC is only bootstrapped when a CLI is present.
+- **Auto-Reconnect Policy**: If a WebRTC link drops while the CLI is still online, the Agent performs one immediate auto-reconnect attempt before falling back to TCP relay.
 
 ## Privacy & Data Handling
 
@@ -394,7 +403,7 @@ RoboTunnel is currently in private beta.
 |---|---|---|
 | v0.2.0 | ✅ Released | Ed25519 tunnel, debug skill, Kimi AI, Go platform |
 | v0.2.3 | ✅ Released | WebRTC P2P, multi-LLM local keys, proactive monitoring, fleet compare, acceptance testing |
-| v0.3.0 | 🚧 Shipping soon | Release binaries, install/register script, GitHub release automation |
+| v0.3.0 | 🚧 Shipping soon | Trust Plane, end-to-end integration and validation, release binaries, CLI, Discord bot |
 | v0.4.x | 📋 Planned | Skill Platform — publish your robot's capabilities for others to discover and use |
 
 ---
