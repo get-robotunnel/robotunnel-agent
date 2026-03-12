@@ -264,12 +264,12 @@ robotunnel skill robot-abc123 system config_set --params '{"section":"monitor","
 
 This repo now publishes agent binaries from Git tags through GitHub Actions.
 
-1. Update `Cargo.toml` to the release version.
-2. Push a matching tag such as `v0.3.1`.
-3. The `Release Agent` workflow builds and attaches:
+1. Manually update `Cargo.toml` to the release version (there is no auto-bump step in CI).
+2. Commit and push that version change.
+3. Push a matching tag such as `v0.3.1` (or `v0.3.1-alpha.1`).
+4. The `Release Agent` workflow builds and attaches:
    - `robotunnel-agent-linux-amd64`
-   - `robotunnel-agent-darwin-amd64`
-   - `robotunnel-agent-darwin-arm64`
+   - `robotunnel-agent-linux-arm64`
    - `checksums.txt`
 
 If the tag version and `Cargo.toml` version do not match, the workflow fails early.

@@ -34,14 +34,15 @@ jobs:
         run: |
           manifest_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
           tag_version="${GITHUB_REF_NAME#v}"
+          tag_core_version="${tag_version%%[-+]*}"
 
           if [[ -z "${manifest_version}" ]]; then
             echo "Unable to read package version from Cargo.toml" >&2
             exit 1
           fi
 
-          if [[ "${manifest_version}" != "${tag_version}" ]]; then
-            echo "Tag ${tag_version} does not match Cargo.toml version ${manifest_version}" >&2
+          if [[ "${manifest_version}" != "${tag_core_version}" ]]; then
+            echo "Tag ${tag_version} does not match Cargo.toml core version ${manifest_version}" >&2
             exit 1
           fi
 
