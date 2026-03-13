@@ -34,13 +34,11 @@ impl Skill for Ros2Skill {
                 "type": "geometry_msgs/msg/Twist",
                 "bridge_url": self.bridge_url,
             })),
-            "subscribe" => {
-                Ok(serde_json::json!({
-                    "status": "mock_streaming",
-                    "topic": _params["topic"],
-                    "bridge_url": self.bridge_url,
-                }))
-            }
+            "subscribe" => Ok(serde_json::json!({
+                "status": "mock_streaming",
+                "topic": _params["topic"],
+                "bridge_url": self.bridge_url,
+            })),
             _ => Err(SkillError::ActionNotFound(_action.to_string())),
         }
     }

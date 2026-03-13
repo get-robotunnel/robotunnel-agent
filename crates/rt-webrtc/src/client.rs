@@ -172,13 +172,15 @@ async fn attempt_webrtc(
     let sig_url = cfg_clone.signaling_url();
     debug!("WebRTC: connecting to signaling server: {}", sig_url);
     log_phase(&cfg_clone, BootstrapPhase::SignalWsConnectStart, None);
-    let (ws_stream, _) = connect_async(&sig_url)
-        .await
-        .with_context(|| {
-            let err_msg = format!("signaling WebSocket connect failed (url={})", sig_url);
-            log_phase(&cfg_clone, BootstrapPhase::SignalWsConnectFail, Some(&err_msg));
-            err_msg
-        })?;
+    let (ws_stream, _) = connect_async(&sig_url).await.with_context(|| {
+        let err_msg = format!("signaling WebSocket connect failed (url={})", sig_url);
+        log_phase(
+            &cfg_clone,
+            BootstrapPhase::SignalWsConnectFail,
+            Some(&err_msg),
+        );
+        err_msg
+    })?;
     log_phase(&cfg_clone, BootstrapPhase::SignalWsConnectOk, None);
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
@@ -317,15 +319,14 @@ async fn fetch_turn_credentials(cfg: &WebRtcConfig) -> Result<TurnCredentialResp
     log_phase(cfg, BootstrapPhase::TurnFetchStart, None);
     let client = reqwest::Client::new();
     let url = cfg.turn_credentials_url();
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| {
-            let err_msg = format!("HTTP transport error fetching TURN credentials from {}", url);
-            log_phase(cfg, BootstrapPhase::TurnFetchFail, Some(&err_msg));
-            err_msg
-        })?;
+    let resp = client.get(&url).send().await.with_context(|| {
+        let err_msg = format!(
+            "HTTP transport error fetching TURN credentials from {}",
+            url
+        );
+        log_phase(cfg, BootstrapPhase::TurnFetchFail, Some(&err_msg));
+        err_msg
+    })?;
 
     let status = resp.status();
     if !status.is_success() {

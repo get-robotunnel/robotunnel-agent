@@ -60,7 +60,10 @@ impl TunnelServer {
         }
     }
 
-    pub fn set_webrtc_trigger(&mut self, tx: mpsc::Sender<crate::protocol::WebRtcBootstrapPayload>) {
+    pub fn set_webrtc_trigger(
+        &mut self,
+        tx: mpsc::Sender<crate::protocol::WebRtcBootstrapPayload>,
+    ) {
         self.webrtc_trigger = Some(tx);
     }
 

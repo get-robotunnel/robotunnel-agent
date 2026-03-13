@@ -2,7 +2,7 @@
 //!
 //! Layer ownership:
 //! - interaction: CLI/web transport ingress
-//! - connection: auth, TCP tunnel, WebRTC, heartbeat
+//! - connection: auth, TCP tunnel, WebRTC
 //! - platform: platform-facing configuration and APIs
 //! - application: robot skills and background services
 
@@ -13,7 +13,6 @@ use application::MonitorSettings;
 use clap::{Parser, Subcommand};
 use rt_core::authorized_keys::AuthorizedKeysSyncService;
 use rt_core::config::AgentConfig;
-use rt_core::heartbeat::HeartbeatService;
 use rt_core::tunnel::TunnelServer;
 use rt_llm::{LlmManager, Provider};
 use std::sync::Arc;
@@ -98,7 +97,10 @@ async fn main() -> anyhow::Result<()> {
     let config = if std::path::Path::new(&config_path).exists() {
         AgentConfig::load_with_env(&config_path)?
     } else {
-        eprintln!("[INFO] config file not found at {}, using defaults", config_path);
+        eprintln!(
+            "[INFO] config file not found at {}, using defaults",
+            config_path
+        );
         let mut config = AgentConfig::default();
         config.apply_env_overrides();
         config.validate_security()?;
@@ -138,6 +140,8 @@ async fn main() -> anyhow::Result<()> {
 
     let (webrtc_trigger_tx, webrtc_trigger_rx) = mpsc::channel(1);
     let (webrtc_teardown_tx, webrtc_teardown_rx) = mpsc::channel(1);
+    let control_trigger_tx = webrtc_trigger_tx.clone();
+    let control_teardown_tx = webrtc_teardown_tx.clone();
     if config.webrtc.enabled {
         tunnel_server.set_webrtc_trigger(webrtc_trigger_tx);
         tunnel_server.set_webrtc_teardown(webrtc_teardown_tx);
@@ -151,22 +155,6 @@ async fn main() -> anyhow::Result<()> {
         Some(config.platform.api_url.clone()),
         config.platform.api_key.clone(),
     );
-
-    // Heartbeat service
-    let heartbeat_handle = if let Some(api_key) = &config.platform.api_key {
-        let heartbeat = HeartbeatService::new(
-            config.platform.api_url.clone(),
-            api_key.clone(),
-            config.heartbeat.interval_secs,
-        );
-        let shutdown_rx = shutdown_rx.clone();
-        Some(tokio::spawn(async move {
-            heartbeat.run(shutdown_rx).await;
-        }))
-    } else {
-        tracing::warn!("no API key configured, heartbeat disabled");
-        None
-    };
 
     let authorized_keys_handle = if let Some(api_key) = &config.platform.api_key {
         let sync = AuthorizedKeysSyncService::new(
@@ -184,6 +172,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("no API key configured, authorized key sync disabled");
         None
     };
+
+    let control_plane_handle = interaction::start_control_plane_bridge_if_enabled(
+        &config,
+        cmd_tx.clone(),
+        control_trigger_tx,
+        control_teardown_tx,
+        shutdown_rx.clone(),
+    );
 
     let webrtc_handle = interaction::start_webrtc_bridge_if_enabled(
         &config,
@@ -216,9 +212,6 @@ async fn main() -> anyhow::Result<()> {
 
     let _ = shutdown_tx.send(true);
     tunnel_server.shutdown();
-    if let Some(handle) = heartbeat_handle {
-        handle.abort();
-    }
     if let Some(handle) = authorized_keys_handle {
         handle.abort();
     }
@@ -228,6 +221,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(handle) = webrtc_handle {
         handle.abort();
     }
+    if let Some(handle) = control_plane_handle {
+        handle.abort();
+    }
     router_handle.abort();
 
     tracing::info!("agent shutdown complete");
@@ -235,7 +231,10 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn resolve_config_path(cli_path: Option<String>) -> String {
-    if let Some(path) = cli_path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) {
+    if let Some(path) = cli_path
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+    {
         return path;
     }
 

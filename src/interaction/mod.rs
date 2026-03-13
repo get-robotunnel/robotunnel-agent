@@ -5,6 +5,7 @@
 
 use crate::application;
 use bytes::Bytes;
+use futures::{SinkExt, StreamExt};
 use rt_core::authorized_keys::fetch_agent_bootstrap;
 use rt_core::config::AgentConfig;
 use rt_core::protocol::{CommandRequest, CommandResponse, CommandStatus, FrameType};
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
+use tokio_tungstenite::tungstenite::Message;
 use webrtc::data_channel::RTCDataChannel;
 
 pub fn start_webrtc_bridge_if_enabled(
@@ -56,7 +58,8 @@ pub fn start_webrtc_bridge_if_enabled(
             }
 
             if resolved_robot_id.is_none() {
-                resolved_robot_id = resolve_robot_id_from_platform(&platform_api_url, &api_key).await;
+                resolved_robot_id =
+                    resolve_robot_id_from_platform(&platform_api_url, &api_key).await;
             }
 
             // On-demand: wait for trigger from platform over TCP tunnel
@@ -70,8 +73,14 @@ pub fn start_webrtc_bridge_if_enabled(
 
             let bootstrap_id = payload.bootstrap_id.clone();
             // TODO: Use payload.cli_public_ip / cli_lan_cidr for routing decisions (LAN bypass)
-            if let (Some(cli_ip), Some(cli_cidr)) = (&payload.cli_public_ip, &payload.cli_lan_cidr) {
-                 tracing::info!("[BOOTSTRAP:{}] CLI Info: PublicIP={}, LAN={}", bootstrap_id, cli_ip, cli_cidr);
+            if let (Some(cli_ip), Some(cli_cidr)) = (&payload.cli_public_ip, &payload.cli_lan_cidr)
+            {
+                tracing::info!(
+                    "[BOOTSTRAP:{}] CLI Info: PublicIP={}, LAN={}",
+                    bootstrap_id,
+                    cli_ip,
+                    cli_cidr
+                );
             }
 
             let robot_id = match resolved_robot_id.clone() {
@@ -111,11 +120,11 @@ pub fn start_webrtc_bridge_if_enabled(
                     bootstrap_id,
                     attempts + 1
                 );
-                
+
                 match rt_webrtc::client::connect(&cfg, on_message.clone()).await {
                     Ok((dc, conn_type)) => {
                         log_webrtc_connected(&conn_type);
-                        
+
                         let (dc_closed_tx, mut dc_closed_rx) = mpsc::channel::<()>(1);
                         dc.on_close(Box::new(move || {
                             let _ = dc_closed_tx.try_send(());
@@ -150,11 +159,14 @@ pub fn start_webrtc_bridge_if_enabled(
                         // Unexpected close: try auto-reconnect once
                         if attempts < MAX_RETRY {
                             attempts += 1;
-                            tracing::info!("[BOOTSTRAP:{}] connection dropped; attempting auto-reconnect...", bootstrap_id);
+                            tracing::info!(
+                                "[BOOTSTRAP:{}] connection dropped; attempting auto-reconnect...",
+                                bootstrap_id
+                            );
                             tokio::time::sleep(Duration::from_secs(1)).await;
                             continue;
                         }
-                        break; 
+                        break;
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -164,7 +176,10 @@ pub fn start_webrtc_bridge_if_enabled(
                         );
                         if attempts < MAX_RETRY {
                             attempts += 1;
-                            tracing::info!("[BOOTSTRAP:{}] retrying webrtc bootstrap...", bootstrap_id);
+                            tracing::info!(
+                                "[BOOTSTRAP:{}] retrying webrtc bootstrap...",
+                                bootstrap_id
+                            );
                             tokio::time::sleep(Duration::from_secs(2)).await;
                             continue;
                         }
@@ -172,19 +187,223 @@ pub fn start_webrtc_bridge_if_enabled(
                     }
                 }
             }
-            tracing::info!("[BOOTSTRAP:{}] ending bootstrap session; waiting for trigger...", bootstrap_id);
+            tracing::info!(
+                "[BOOTSTRAP:{}] ending bootstrap session; waiting for trigger...",
+                bootstrap_id
+            );
+        }
+    }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AgentControlInbound {
+    #[serde(rename = "type")]
+    msg_type: String,
+    #[serde(default)]
+    bootstrap_id: Option<String>,
+    #[serde(default)]
+    cli_public_ip: Option<String>,
+    #[serde(default)]
+    cli_lan_cidr: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    command: Option<serde_json::Value>,
+}
+
+pub fn start_control_plane_bridge_if_enabled(
+    config: &AgentConfig,
+    command_tx: mpsc::Sender<IncomingCommand>,
+    webrtc_trigger_tx: mpsc::Sender<rt_core::protocol::WebRtcBootstrapPayload>,
+    webrtc_teardown_tx: mpsc::Sender<()>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> Option<JoinHandle<()>> {
+    let api_key = match config.platform.api_key.clone() {
+        Some(v) if !v.trim().is_empty() => v,
+        _ => {
+            tracing::warn!("control plane channel disabled: platform.api_key is missing");
+            return None;
+        }
+    };
+
+    let configured_robot_id = config
+        .webrtc
+        .robot_id
+        .clone()
+        .or_else(|| std::env::var("RT_ROBOT_ID").ok())
+        .and_then(|value| normalize_robot_id(&value));
+    let platform_api_url = config.platform.api_url.clone();
+    let platform_ws_url = to_ws_base_url(&platform_api_url);
+
+    Some(tokio::spawn(async move {
+        let mut resolved_robot_id = configured_robot_id.clone();
+
+        loop {
+            if *shutdown_rx.borrow() {
+                break;
+            }
+
+            if resolved_robot_id.is_none() {
+                resolved_robot_id =
+                    resolve_robot_id_from_platform(&platform_api_url, &api_key).await;
+            }
+
+            let robot_id = match resolved_robot_id.clone() {
+                Some(v) => v,
+                None => {
+                    tracing::warn!(
+                        "control plane channel: robot_id missing and bootstrap lookup failed; retrying"
+                    );
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs(20)) => {}
+                        _ = shutdown_rx.changed() => { break; }
+                    }
+                    continue;
+                }
+            };
+
+            let control_url = format!(
+                "{}/api/agent/connect?robot_id={}&api_key={}",
+                platform_ws_url, robot_id, api_key
+            );
+            tracing::info!(
+                "[control] connecting to platform control channel: robot={} endpoint={}/api/agent/connect",
+                robot_id,
+                platform_ws_url
+            );
+
+            let ws = match tokio_tungstenite::connect_async(&control_url).await {
+                Ok((stream, _)) => {
+                    tracing::info!("[control] connected: robot={}", robot_id);
+                    stream
+                }
+                Err(err) => {
+                    tracing::warn!("[control] connect failed: robot={} err={:#}", robot_id, err);
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs(3)) => {}
+                        _ = shutdown_rx.changed() => { break; }
+                    }
+                    continue;
+                }
+            };
+
+            let (mut write, mut read) = ws.split();
+            let mut ping_tick = tokio::time::interval(Duration::from_secs(30));
+
+            loop {
+                tokio::select! {
+                    _ = ping_tick.tick() => {
+                        if let Err(err) = write.send(Message::Ping(Vec::new().into())).await {
+                            tracing::warn!("[control] ping failed: robot={} err={}", robot_id, err);
+                            break;
+                        }
+                    }
+                    maybe_msg = read.next() => {
+                        match maybe_msg {
+                            Some(Ok(Message::Text(text))) => {
+                                match serde_json::from_str::<AgentControlInbound>(&text) {
+                                    Ok(msg) => {
+                                        match msg.msg_type.as_str() {
+                                            "webrtc_bootstrap" => {
+                                                let payload = rt_core::protocol::WebRtcBootstrapPayload {
+                                                    bootstrap_id: normalize_bootstrap_id(msg.bootstrap_id),
+                                                    cli_public_ip: normalize_optional(msg.cli_public_ip),
+                                                    cli_lan_cidr: normalize_optional(msg.cli_lan_cidr),
+                                                };
+                                                if webrtc_trigger_tx.send(payload).await.is_err() {
+                                                    tracing::warn!("[control] webrtc trigger channel closed");
+                                                    continue;
+                                                }
+                                            }
+                                            "webrtc_teardown" => {
+                                                if webrtc_teardown_tx.send(()).await.is_err() {
+                                                    tracing::warn!("[control] webrtc teardown channel closed");
+                                                    continue;
+                                                }
+                                            }
+                                            "command_request" => {
+                                                let response = match msg.command {
+                                                    Some(raw) => match serde_json::from_value::<CommandRequest>(raw) {
+                                                        Ok(request) => application::dispatch_request(&command_tx, request).await,
+                                                        Err(err) => CommandResponse {
+                                                            id: "invalid".to_string(),
+                                                            status: CommandStatus::Error,
+                                                            data: None,
+                                                            error: Some(format!("invalid command payload: {}", err)),
+                                                        },
+                                                    },
+                                                    None => CommandResponse {
+                                                        id: "invalid".to_string(),
+                                                        status: CommandStatus::Error,
+                                                        data: None,
+                                                        error: Some("missing command payload".to_string()),
+                                                    },
+                                                };
+
+                                                let outbound = serde_json::json!({
+                                                    "type": "command_response",
+                                                    "request_id": normalize_bootstrap_id(msg.request_id),
+                                                    "response": response,
+                                                });
+                                                if let Err(err) = write.send(Message::Text(outbound.to_string().into())).await {
+                                                    tracing::warn!("[control] command response write failed: robot={} err={}", robot_id, err);
+                                                    break;
+                                                }
+                                            }
+                                            other => {
+                                                tracing::debug!("[control] ignoring message type={}", other);
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!("[control] invalid control message: {}", err);
+                                    }
+                                }
+                            }
+                            Some(Ok(Message::Ping(payload))) => {
+                                if let Err(err) = write.send(Message::Pong(payload)).await {
+                                    tracing::warn!("[control] pong write failed: robot={} err={}", robot_id, err);
+                                    break;
+                                }
+                            }
+                            Some(Ok(Message::Close(_))) => {
+                                tracing::info!("[control] platform closed control channel: robot={}", robot_id);
+                                break;
+                            }
+                            Some(Ok(_)) => {}
+                            Some(Err(err)) => {
+                                tracing::warn!("[control] read failed: robot={} err={}", robot_id, err);
+                                break;
+                            }
+                            None => {
+                                tracing::info!("[control] channel ended: robot={}", robot_id);
+                                break;
+                            }
+                        }
+                    }
+                    _ = shutdown_rx.changed() => {
+                        let _ = write.send(Message::Close(None)).await;
+                        return;
+                    }
+                }
+            }
+
+            tokio::select! {
+                _ = sleep(Duration::from_secs(2)) => {}
+                _ = shutdown_rx.changed() => { break; }
+            }
         }
     }))
 }
 
 async fn resolve_robot_id_from_platform(api_url: &str, api_key: &str) -> Option<String> {
     match fetch_agent_bootstrap(api_url, api_key).await {
-        Ok(bootstrap) => bootstrap
-            .robot_id
-            .as_deref()
-            .and_then(normalize_robot_id),
+        Ok(bootstrap) => bootstrap.robot_id.as_deref().and_then(normalize_robot_id),
         Err(err) => {
-            tracing::warn!("webrtc: failed to resolve robot_id from platform: {:#}", err);
+            tracing::warn!(
+                "webrtc: failed to resolve robot_id from platform: {:#}",
+                err
+            );
             None
         }
     }
@@ -196,6 +415,24 @@ fn normalize_robot_id(value: &str) -> Option<String> {
         return None;
     }
     Some(value.to_string())
+}
+
+fn normalize_optional(value: Option<String>) -> Option<String> {
+    value.and_then(|v| {
+        let trimmed = v.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+fn normalize_bootstrap_id(value: Option<String>) -> String {
+    match normalize_optional(value) {
+        Some(v) => v,
+        None => uuid::Uuid::new_v4().to_string(),
+    }
 }
 
 fn log_webrtc_connected(conn_type: &ConnectionType) {

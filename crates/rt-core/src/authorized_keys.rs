@@ -73,20 +73,20 @@ impl AuthorizedKeysSyncService {
     async fn sync_once(&self, tunnel_server: &Arc<TunnelServer>) {
         match fetch_agent_bootstrap_with_client(&self.client, &self.api_url, &self.api_key).await {
             Ok(payload) => {
-                        let mut merged_keys = self.static_authorized_keys.clone();
-                        merged_keys.extend(payload.authorized_keys);
-                        let merged_keys = normalize_keys(merged_keys);
-                        let current = tunnel_server.authorized_keys();
-                        if current != merged_keys {
-                            let count = merged_keys.len();
-                            tunnel_server.replace_authorized_keys(merged_keys);
-                            tracing::info!(
-                                "authorized_keys: updated tunnel allowlist ({} key(s))",
-                                count
-                            );
-                        } else {
-                            tracing::debug!("authorized_keys: allowlist unchanged");
-                        }
+                let mut merged_keys = self.static_authorized_keys.clone();
+                merged_keys.extend(payload.authorized_keys);
+                let merged_keys = normalize_keys(merged_keys);
+                let current = tunnel_server.authorized_keys();
+                if current != merged_keys {
+                    let count = merged_keys.len();
+                    tunnel_server.replace_authorized_keys(merged_keys);
+                    tracing::info!(
+                        "authorized_keys: updated tunnel allowlist ({} key(s))",
+                        count
+                    );
+                } else {
+                    tracing::debug!("authorized_keys: allowlist unchanged");
+                }
             }
             Err(err) => {
                 tracing::warn!("authorized_keys: sync failed: {}", err);
