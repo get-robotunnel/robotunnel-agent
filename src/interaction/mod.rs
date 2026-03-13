@@ -12,17 +12,18 @@ use rt_core::protocol::{CommandRequest, CommandResponse, CommandStatus, FrameTyp
 use rt_core::tunnel::IncomingCommand;
 use rt_webrtc::{ConnectionType, WebRtcConfig};
 use std::sync::Arc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 use webrtc::data_channel::RTCDataChannel;
 
 pub fn start_webrtc_bridge_if_enabled(
     config: &AgentConfig,
     command_tx: mpsc::Sender<IncomingCommand>,
     mut webrtc_trigger_rx: mpsc::Receiver<rt_core::protocol::WebRtcBootstrapPayload>,
-    mut webrtc_teardown_rx: mpsc::Receiver<()>,
+    mut webrtc_teardown_rx: mpsc::Receiver<rt_core::protocol::WebRtcTeardownPayload>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
     if !config.webrtc.enabled {
@@ -141,10 +142,13 @@ pub fn start_webrtc_bridge_if_enabled(
                                     tracing::warn!("[BOOTSTRAP:{}] webrtc datachannel closed", bootstrap_id);
                                     break;
                                 }
-                                Some(_) = webrtc_teardown_rx.recv() => {
-                                    tracing::info!("[BOOTSTRAP:{}] webrtc: received teardown signal, closing", bootstrap_id);
-                                    is_teardown = true;
-                                    break;
+                                Some(teardown) = webrtc_teardown_rx.recv() => {
+                                    if teardown_matches(&teardown, &bootstrap_id) {
+                                        tracing::info!("[BOOTSTRAP:{}] webrtc: received teardown signal, closing", bootstrap_id);
+                                        is_teardown = true;
+                                        break;
+                                    }
+                                    tracing::debug!("[BOOTSTRAP:{}] webrtc: ignoring teardown for different bootstrap_id", bootstrap_id);
                                 }
                                 _ = shutdown_rx.changed() => {
                                     break;
@@ -202,6 +206,8 @@ struct AgentControlInbound {
     #[serde(default)]
     bootstrap_id: Option<String>,
     #[serde(default)]
+    session_key: Option<String>,
+    #[serde(default)]
     cli_public_ip: Option<String>,
     #[serde(default)]
     cli_lan_cidr: Option<String>,
@@ -215,7 +221,7 @@ pub fn start_control_plane_bridge_if_enabled(
     config: &AgentConfig,
     command_tx: mpsc::Sender<IncomingCommand>,
     webrtc_trigger_tx: mpsc::Sender<rt_core::protocol::WebRtcBootstrapPayload>,
-    webrtc_teardown_tx: mpsc::Sender<()>,
+    webrtc_teardown_tx: mpsc::Sender<rt_core::protocol::WebRtcTeardownPayload>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Option<JoinHandle<()>> {
     let api_key = match config.platform.api_key.clone() {
@@ -263,8 +269,8 @@ pub fn start_control_plane_bridge_if_enabled(
             };
 
             let control_url = format!(
-                "{}/api/agent/connect?robot_id={}&api_key={}",
-                platform_ws_url, robot_id, api_key
+                "{}/api/agent/connect?robot_id={}",
+                platform_ws_url, robot_id
             );
             tracing::info!(
                 "[control] connecting to platform control channel: robot={} endpoint={}/api/agent/connect",
@@ -272,7 +278,41 @@ pub fn start_control_plane_bridge_if_enabled(
                 platform_ws_url
             );
 
-            let ws = match tokio_tungstenite::connect_async(&control_url).await {
+            let mut request = match control_url.clone().into_client_request() {
+                Ok(req) => req,
+                Err(err) => {
+                    tracing::warn!(
+                        "[control] failed to build ws request: robot={} err={:#}",
+                        robot_id,
+                        err
+                    );
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs(3)) => {}
+                        _ = shutdown_rx.changed() => { break; }
+                    }
+                    continue;
+                }
+            };
+            let header_value = match HeaderValue::from_str(&api_key) {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!(
+                        "[control] invalid api_key header value: robot={} err={:#}",
+                        robot_id,
+                        err
+                    );
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs(3)) => {}
+                        _ = shutdown_rx.changed() => { break; }
+                    }
+                    continue;
+                }
+            };
+            request
+                .headers_mut()
+                .insert("X-Robot-API-Key", header_value);
+
+            let ws = match tokio_tungstenite::connect_async(request).await {
                 Ok((stream, _)) => {
                     tracing::info!("[control] connected: robot={}", robot_id);
                     stream
@@ -305,23 +345,52 @@ pub fn start_control_plane_bridge_if_enabled(
                                     Ok(msg) => {
                                         match msg.msg_type.as_str() {
                                             "webrtc_bootstrap" => {
+                                                let session_key = normalize_session_key(
+                                                    msg.session_key.clone(),
+                                                    msg.bootstrap_id.clone(),
+                                                );
                                                 let payload = rt_core::protocol::WebRtcBootstrapPayload {
-                                                    bootstrap_id: normalize_bootstrap_id(msg.bootstrap_id),
+                                                    bootstrap_id: session_key,
                                                     cli_public_ip: normalize_optional(msg.cli_public_ip),
                                                     cli_lan_cidr: normalize_optional(msg.cli_lan_cidr),
                                                 };
-                                                if webrtc_trigger_tx.send(payload).await.is_err() {
-                                                    tracing::warn!("[control] webrtc trigger channel closed");
-                                                    continue;
+                                                match webrtc_trigger_tx.try_send(payload) {
+                                                    Ok(()) => {}
+                                                    Err(TrySendError::Closed(_)) => {
+                                                        tracing::warn!("[control] webrtc trigger channel closed");
+                                                        continue;
+                                                    }
+                                                    Err(TrySendError::Full(_)) => {
+                                                        tracing::warn!("[control] webrtc trigger channel full; dropping stale trigger");
+                                                        continue;
+                                                    }
                                                 }
                                             }
                                             "webrtc_teardown" => {
-                                                if webrtc_teardown_tx.send(()).await.is_err() {
-                                                    tracing::warn!("[control] webrtc teardown channel closed");
-                                                    continue;
+                                                let session_key = normalize_optional_session_key(
+                                                    msg.session_key.clone(),
+                                                    msg.bootstrap_id.clone(),
+                                                );
+                                                let payload = rt_core::protocol::WebRtcTeardownPayload {
+                                                    bootstrap_id: session_key,
+                                                };
+                                                match webrtc_teardown_tx.try_send(payload) {
+                                                    Ok(()) => {}
+                                                    Err(TrySendError::Closed(_)) => {
+                                                        tracing::warn!("[control] webrtc teardown channel closed");
+                                                        continue;
+                                                    }
+                                                    Err(TrySendError::Full(_)) => {
+                                                        tracing::warn!("[control] webrtc teardown channel full; dropping stale teardown");
+                                                        continue;
+                                                    }
                                                 }
                                             }
                                             "command_request" => {
+                                                let session_key = normalize_optional_session_key(
+                                                    msg.session_key.clone(),
+                                                    msg.bootstrap_id.clone(),
+                                                );
                                                 let response = match msg.command {
                                                     Some(raw) => match serde_json::from_value::<CommandRequest>(raw) {
                                                         Ok(request) => application::dispatch_request(&command_tx, request).await,
@@ -340,12 +409,32 @@ pub fn start_control_plane_bridge_if_enabled(
                                                     },
                                                 };
 
-                                                let outbound = serde_json::json!({
-                                                    "type": "command_response",
-                                                    "request_id": normalize_bootstrap_id(msg.request_id),
-                                                    "response": response,
-                                                });
-                                                if let Err(err) = write.send(Message::Text(outbound.to_string().into())).await {
+                                                let mut outbound = serde_json::Map::new();
+                                                outbound.insert(
+                                                    "type".to_string(),
+                                                    serde_json::Value::String("command_response".to_string()),
+                                                );
+                                                outbound.insert(
+                                                    "request_id".to_string(),
+                                                    serde_json::Value::String(normalize_bootstrap_id(msg.request_id)),
+                                                );
+                                                outbound.insert(
+                                                    "response".to_string(),
+                                                    serde_json::to_value(response).unwrap_or(serde_json::Value::Null),
+                                                );
+                                                if let Some(key) = session_key {
+                                                    outbound.insert(
+                                                        "session_key".to_string(),
+                                                        serde_json::Value::String(key.clone()),
+                                                    );
+                                                    outbound.insert(
+                                                        "bootstrap_id".to_string(),
+                                                        serde_json::Value::String(key),
+                                                    );
+                                                }
+
+                                                let outbound = serde_json::Value::Object(outbound).to_string();
+                                                if let Err(err) = write.send(Message::Text(outbound.into())).await {
                                                     tracing::warn!("[control] command response write failed: robot={} err={}", robot_id, err);
                                                     break;
                                                 }
@@ -432,6 +521,31 @@ fn normalize_bootstrap_id(value: Option<String>) -> String {
     match normalize_optional(value) {
         Some(v) => v,
         None => uuid::Uuid::new_v4().to_string(),
+    }
+}
+
+fn normalize_session_key(session_key: Option<String>, bootstrap_id: Option<String>) -> String {
+    match normalize_optional_session_key(session_key, bootstrap_id) {
+        Some(v) => v,
+        None => uuid::Uuid::new_v4().to_string(),
+    }
+}
+
+fn normalize_optional_session_key(
+    session_key: Option<String>,
+    bootstrap_id: Option<String>,
+) -> Option<String> {
+    normalize_optional(session_key).or_else(|| normalize_optional(bootstrap_id))
+}
+
+fn teardown_matches(payload: &rt_core::protocol::WebRtcTeardownPayload, current_id: &str) -> bool {
+    let id = payload
+        .bootstrap_id
+        .as_ref()
+        .and_then(|value| normalize_optional(Some(value.clone())));
+    match id {
+        Some(v) => v == current_id,
+        None => true,
     }
 }
 
