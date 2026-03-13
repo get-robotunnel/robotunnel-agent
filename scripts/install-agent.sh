@@ -228,8 +228,77 @@ install_from_source() {
   echo "[INFO] built + installed -> ${INSTALL_BIN_DIR}/robotunnel-agent"
 }
 
+read_agent_config_value() {
+  local key="$1"
+  if [[ ! -f "${AGENT_CONFIG_PATH}" ]]; then
+    return 0
+  fi
+  local line value
+  line="$(grep -E "^[[:space:]]*${key}[[:space:]]*=" "${AGENT_CONFIG_PATH}" | head -n 1 || true)"
+  if [[ -z "${line}" ]]; then
+    return 0
+  fi
+  value="${line#*=}"
+  value="$(echo "${value}" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g; s/^"//; s/"$//')"
+  echo "${value}"
+}
+
+probe_api_key_on_base() {
+  local base_url="$1"
+  local api_key="$2"
+  local resp code
+  resp="$(curl -sS -X POST "${base_url}/api/heartbeat" -H 'Content-Type: application/json' -d "{\"api_key\":\"${api_key}\"}" -w $'\n%{http_code}' || true)"
+  code="${resp##*$'\n'}"
+  [[ "${code}" =~ ^2[0-9][0-9]$ ]]
+}
+
+try_reuse_existing_registration() {
+  local preferred_base="$1"
+  local existing_api_key existing_robot_id existing_api_url candidate_base
+  existing_api_key="$(read_agent_config_value "api_key")"
+  existing_robot_id="$(read_agent_config_value "robot_id")"
+  existing_api_url="$(read_agent_config_value "api_url")"
+
+  if [[ -z "${existing_api_key}" ]]; then
+    echo "[INFO] no reusable api_key found in ${AGENT_CONFIG_PATH}" >&2
+    return 1
+  fi
+
+  for candidate_base in "${preferred_base}" "${existing_api_url}"; do
+    candidate_base="$(trim_trailing_slash "${candidate_base}")"
+    if [[ -z "${candidate_base}" ]]; then
+      continue
+    fi
+    if ! probe_api_key_on_base "${candidate_base}" "${existing_api_key}"; then
+      continue
+    fi
+
+    REGISTERED_API_KEY="${existing_api_key}"
+    REGISTERED_ROBOT_ID="${existing_robot_id}"
+    REGISTERED_AGENT_ID="${AGENT_ID}"
+    PLATFORM_BASE_URL="${candidate_base}"
+
+    if [[ -z "${REGISTERED_ROBOT_ID}" ]]; then
+      local ak_resp ak_body ak_code
+      ak_resp="$(curl -sS "${candidate_base}/api/agent/authorized-keys?api_key=${existing_api_key}" -w $'\n%{http_code}' || true)"
+      ak_code="${ak_resp##*$'\n'}"
+      ak_body="${ak_resp%$'\n'*}"
+      if [[ "${ak_code}" =~ ^2[0-9][0-9]$ ]]; then
+        REGISTERED_ROBOT_ID="$(echo "${ak_body}" | jq -r '.robot_id // .data.robot_id // empty' 2>/dev/null || true)"
+      fi
+    fi
+
+    echo "[WARN] register failed, reused existing api_key from ${AGENT_CONFIG_PATH}" >&2
+    echo "[INFO] continuing with existing robot_id=${REGISTERED_ROBOT_ID:-unknown} on ${candidate_base}" >&2
+    return 0
+  done
+
+  echo "[INFO] existing api_key found but validation failed on available API base URLs" >&2
+  return 1
+}
+
 register_robot() {
-  local base_url payload resp
+  local base_url payload resp http_code body err_msg
   base_url="$(trim_trailing_slash "${PLATFORM_BASE_URL}")"
   payload="$(jq -n \
     --arg rt_key "${RT_KEY}" \
@@ -242,10 +311,28 @@ register_robot() {
      + (if $avatar_url != "" then {avatar_url: $avatar_url} else {} end)')"
 
   echo "[INFO] registering robot via ${base_url}/api/register (agent_id=${AGENT_ID})"
-  if ! resp="$(curl -fsSL -X POST "${base_url}/api/register" -H 'Content-Type: application/json' -d "${payload}")"; then
-    echo "[ERROR] register API request failed" >&2
+  if ! resp="$(curl -sS -X POST "${base_url}/api/register" -H 'Content-Type: application/json' -d "${payload}" -w $'\n%{http_code}')"; then
+    echo "[ERROR] register API request failed (network or TLS error)" >&2
     exit 1
   fi
+
+  http_code="${resp##*$'\n'}"
+  body="${resp%$'\n'*}"
+  if [[ ! "${http_code}" =~ ^2[0-9][0-9]$ ]]; then
+    err_msg="$(echo "${body}" | jq -r '.error // .message // empty' 2>/dev/null || true)"
+    echo "[ERROR] register API request failed (HTTP ${http_code})" >&2
+    if [[ -n "${err_msg}" ]]; then
+      echo "[ERROR] ${err_msg}" >&2
+    fi
+    if [[ -n "${body// }" ]]; then
+      echo "[ERROR] response: ${body}" >&2
+    fi
+    if try_reuse_existing_registration "${base_url}"; then
+      return 0
+    fi
+    exit 1
+  fi
+  resp="${body}"
 
   REGISTERED_API_KEY="$(echo "${resp}" | jq -r '.data.api_key // .api_key // empty')"
   REGISTERED_ROBOT_ID="$(echo "${resp}" | jq -r '.data.robot_id // .robot_id // empty')"
