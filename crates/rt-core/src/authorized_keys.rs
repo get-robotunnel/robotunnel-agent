@@ -36,7 +36,7 @@ impl AuthorizedKeysSyncService {
         Self {
             api_url,
             api_key,
-            interval: Duration::from_secs(interval_secs.max(15)),
+            interval: Duration::from_secs(interval_secs.max(5)),
             static_authorized_keys: normalize_keys(static_authorized_keys),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
@@ -111,13 +111,13 @@ async fn fetch_agent_bootstrap_with_client(
     api_key: &str,
 ) -> Result<AgentBootstrap, reqwest::Error> {
     let url = format!(
-        "{}/api/agent/authorized-keys?api_key={}",
-        api_url.trim_end_matches('/'),
-        api_key
+        "{}/api/agent/authorized-keys",
+        api_url.trim_end_matches('/')
     );
 
     let payload = client
         .get(&url)
+        .header("X-Robot-API-Key", api_key)
         .send()
         .await?
         .error_for_status()?

@@ -37,7 +37,7 @@ pub struct TunnelServer {
     /// Optional channel to trigger WebRTC bootstrap with payload.
     webrtc_trigger: Option<mpsc::Sender<crate::protocol::WebRtcBootstrapPayload>>,
     /// Optional channel to trigger WebRTC teardown.
-    webrtc_teardown: Option<mpsc::Sender<()>>,
+    webrtc_teardown: Option<mpsc::Sender<crate::protocol::WebRtcTeardownPayload>>,
 }
 
 impl TunnelServer {
@@ -67,7 +67,10 @@ impl TunnelServer {
         self.webrtc_trigger = Some(tx);
     }
 
-    pub fn set_webrtc_teardown(&mut self, tx: mpsc::Sender<()>) {
+    pub fn set_webrtc_teardown(
+        &mut self,
+        tx: mpsc::Sender<crate::protocol::WebRtcTeardownPayload>,
+    ) {
         self.webrtc_teardown = Some(tx);
     }
 
@@ -154,7 +157,7 @@ async fn handle_client<S>(
     mut broadcast_rx: broadcast::Receiver<Vec<u8>>,
     shutdown: Arc<tokio::sync::Notify>,
     webrtc_trigger: Option<mpsc::Sender<crate::protocol::WebRtcBootstrapPayload>>,
-    webrtc_teardown: Option<mpsc::Sender<()>>,
+    webrtc_teardown: Option<mpsc::Sender<crate::protocol::WebRtcTeardownPayload>>,
 ) -> Result<(), ProtocolError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -238,7 +241,13 @@ where
                             }
                             FrameType::WebRtcTeardown => {
                                 if let Some(tx) = &webrtc_teardown {
-                                    let _ = tx.try_send(());
+                                    let payload = if data.is_empty() {
+                                        crate::protocol::WebRtcTeardownPayload { bootstrap_id: None }
+                                    } else {
+                                        serde_json::from_slice::<crate::protocol::WebRtcTeardownPayload>(&data)
+                                            .unwrap_or_else(|_| crate::protocol::WebRtcTeardownPayload { bootstrap_id: None })
+                                    };
+                                    let _ = tx.try_send(payload);
                                     tracing::info!("tunnel: received WebRtcTeardown trigger");
                                 }
                             }
@@ -297,6 +306,8 @@ mod tests {
                 server.command_tx.clone(),
                 broadcast_rx,
                 shutdown,
+                None,
+                None,
             )
             .await
         });

@@ -12,15 +12,18 @@ use anyhow::{bail, Context, Result};
 use futures::{SinkExt, StreamExt};
 // use serde_json::Value; // Removed unused
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
+};
 use tracing::{debug, info, warn};
 use webrtc::{
     api::{
         interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
         setting_engine::SettingEngine, APIBuilder,
     },
-    dtls::extension::extension_use_srtp::SrtpProtectionProfile,
     data_channel::RTCDataChannel,
+    dtls::extension::extension_use_srtp::SrtpProtectionProfile,
     ice::network_type::NetworkType,
     ice_transport::{
         ice_candidate::{RTCIceCandidate, RTCIceCandidateInit},
@@ -180,7 +183,28 @@ async fn attempt_webrtc(
     let sig_url = cfg_clone.signaling_url();
     debug!("WebRTC: connecting to signaling server: {}", sig_url);
     log_phase(&cfg_clone, BootstrapPhase::SignalWsConnectStart, None);
-    let (ws_stream, _) = connect_async(&sig_url).await.with_context(|| {
+    let mut ws_req = sig_url.clone().into_client_request().with_context(|| {
+        let err_msg = format!("invalid signaling WebSocket URL (url={})", sig_url);
+        log_phase(
+            &cfg_clone,
+            BootstrapPhase::SignalWsConnectFail,
+            Some(&err_msg),
+        );
+        err_msg
+    })?;
+    let api_key_header = HeaderValue::from_str(&cfg.api_key).with_context(|| {
+        let err_msg = "invalid robot API key for signaling header";
+        log_phase(
+            &cfg_clone,
+            BootstrapPhase::SignalWsConnectFail,
+            Some(err_msg),
+        );
+        err_msg
+    })?;
+    ws_req
+        .headers_mut()
+        .insert("X-Robot-API-Key", api_key_header);
+    let (ws_stream, _) = connect_async(ws_req).await.with_context(|| {
         let err_msg = format!("signaling WebSocket connect failed (url={})", sig_url);
         log_phase(
             &cfg_clone,
@@ -327,14 +351,19 @@ async fn fetch_turn_credentials(cfg: &WebRtcConfig) -> Result<TurnCredentialResp
     log_phase(cfg, BootstrapPhase::TurnFetchStart, None);
     let client = reqwest::Client::new();
     let url = cfg.turn_credentials_url();
-    let resp = client.get(&url).send().await.with_context(|| {
-        let err_msg = format!(
-            "HTTP transport error fetching TURN credentials from {}",
-            url
-        );
-        log_phase(cfg, BootstrapPhase::TurnFetchFail, Some(&err_msg));
-        err_msg
-    })?;
+    let resp = client
+        .get(&url)
+        .header("X-Robot-API-Key", cfg.api_key.clone())
+        .send()
+        .await
+        .with_context(|| {
+            let err_msg = format!(
+                "HTTP transport error fetching TURN credentials from {}",
+                url
+            );
+            log_phase(cfg, BootstrapPhase::TurnFetchFail, Some(&err_msg));
+            err_msg
+        })?;
 
     let status = resp.status();
     if !status.is_success() {

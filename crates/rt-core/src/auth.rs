@@ -10,13 +10,16 @@
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::RngCore;
+use std::future::Future;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::{timeout, Duration};
 
 pub const NONCE_LEN: usize = 32;
 pub const PUBLIC_KEY_LEN: usize = 32;
 pub const SIGNATURE_LEN: usize = 64;
+const AUTH_IO_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Debug, Error)]
 pub enum AuthError {
@@ -68,17 +71,17 @@ impl ServerAuthenticator {
         // 1. Generate and send nonce
         let mut nonce = [0u8; NONCE_LEN];
         rand::thread_rng().fill_bytes(&mut nonce);
-        stream.write_all(&nonce).await?;
-        stream.flush().await?;
+        with_io_timeout(stream.write_all(&nonce), "write nonce").await?;
+        with_io_timeout(stream.flush(), "flush nonce").await?;
 
         tracing::debug!("auth: sent nonce ({} bytes)", NONCE_LEN);
 
         // 2. Receive public key + signature
         let mut pub_key_bytes = [0u8; PUBLIC_KEY_LEN];
-        stream.read_exact(&mut pub_key_bytes).await?;
+        with_io_timeout(stream.read_exact(&mut pub_key_bytes), "read public key").await?;
 
         let mut sig_bytes = [0u8; SIGNATURE_LEN];
-        stream.read_exact(&mut sig_bytes).await?;
+        with_io_timeout(stream.read_exact(&mut sig_bytes), "read signature").await?;
 
         tracing::debug!("auth: received key+signature");
 
@@ -99,13 +102,13 @@ impl ServerAuthenticator {
         if !authorized_keys.is_empty() && !authorized_keys.contains(&pub_key_hex) {
             tracing::warn!("auth: key {} not in authorized list", &pub_key_hex[..16]);
             // Send rejection byte
-            stream.write_u8(0x00).await?;
+            with_io_timeout(stream.write_u8(0x00), "write auth reject").await?;
             return Err(AuthError::Unauthorized);
         }
 
         // Send acceptance byte
-        stream.write_u8(0x01).await?;
-        stream.flush().await?;
+        with_io_timeout(stream.write_u8(0x01), "write auth accept").await?;
+        with_io_timeout(stream.flush(), "flush auth accept").await?;
 
         Ok(pub_key_hex)
     }
@@ -131,7 +134,7 @@ impl ClientAuthenticator {
     {
         // 1. Receive nonce
         let mut nonce = [0u8; NONCE_LEN];
-        stream.read_exact(&mut nonce).await?;
+        with_io_timeout(stream.read_exact(&mut nonce), "read nonce").await?;
 
         tracing::debug!("auth: received nonce");
 
@@ -139,14 +142,14 @@ impl ClientAuthenticator {
         let signature = self.signing_key.sign(&nonce);
         let pub_key_bytes = self.signing_key.verifying_key().to_bytes();
 
-        stream.write_all(&pub_key_bytes).await?;
-        stream.write_all(&signature.to_bytes()).await?;
-        stream.flush().await?;
+        with_io_timeout(stream.write_all(&pub_key_bytes), "write public key").await?;
+        with_io_timeout(stream.write_all(&signature.to_bytes()), "write signature").await?;
+        with_io_timeout(stream.flush(), "flush auth payload").await?;
 
         tracing::debug!("auth: sent key+signature");
 
         // 3. Read acceptance/rejection
-        let result = stream.read_u8().await?;
+        let result = with_io_timeout(stream.read_u8(), "read auth result").await?;
         if result != 0x01 {
             return Err(AuthError::Unauthorized);
         }
@@ -158,6 +161,20 @@ impl ClientAuthenticator {
     /// Get the hex-encoded public key.
     pub fn public_key_hex(&self) -> String {
         hex::encode(self.signing_key.verifying_key().to_bytes())
+    }
+}
+
+async fn with_io_timeout<T, F>(fut: F, op: &'static str) -> Result<T, AuthError>
+where
+    F: Future<Output = Result<T, std::io::Error>>,
+{
+    match timeout(Duration::from_secs(AUTH_IO_TIMEOUT_SECS), fut).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(err)) => Err(AuthError::Io(err)),
+        Err(_) => Err(AuthError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("auth {} timeout", op),
+        ))),
     }
 }
 

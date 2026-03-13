@@ -95,7 +95,7 @@ fetch_agent_authorized_keys() {
   local base_url resp
   base_url="$(trim_trailing_slash "${PLATFORM_BASE_URL}")"
 
-  if ! resp="$(curl -fsSL "${base_url}/api/agent/authorized-keys?api_key=${REGISTERED_API_KEY}")"; then
+  if ! resp="$(curl -fsSL -H "X-Robot-API-Key: ${REGISTERED_API_KEY}" "${base_url}/api/agent/authorized-keys")"; then
     if ! resp="$(curl -fsSL "${base_url}/api/agent-auth-public-key")"; then
       echo "[WARN] failed to fetch platform authorized keys; will keep fallback auth mode"
       return 1
@@ -280,7 +280,7 @@ try_reuse_existing_registration() {
 
     if [[ -z "${REGISTERED_ROBOT_ID}" ]]; then
       local ak_resp ak_body ak_code
-      ak_resp="$(curl -sS "${candidate_base}/api/agent/authorized-keys?api_key=${existing_api_key}" -w $'\n%{http_code}' || true)"
+      ak_resp="$(curl -sS -H "X-Robot-API-Key: ${existing_api_key}" "${candidate_base}/api/agent/authorized-keys" -w $'\n%{http_code}' || true)"
       ak_code="${ak_resp##*$'\n'}"
       ak_body="${ak_resp%$'\n'*}"
       if [[ "${ak_code}" =~ ^2[0-9][0-9]$ ]]; then
@@ -351,7 +351,7 @@ write_agent_config() {
   mkdir -p "$(dirname "${AGENT_CONFIG_PATH}")"
 
   local resolved_webrtc_robot_id
-  resolved_webrtc_robot_id="${WEBRTC_ROBOT_ID:-${REGISTERED_ROBOT_ID:-${AGENT_ID}}}"
+  resolved_webrtc_robot_id="${WEBRTC_ROBOT_ID:-${REGISTERED_ROBOT_ID:-}}"
 
   local merged_authorized_keys
   merged_authorized_keys="${AUTHORIZED_KEYS:-}"
@@ -442,7 +442,7 @@ LOG_LEVEL="${LOG_LEVEL:-info}"
 WEBRTC_ENABLED="${WEBRTC_ENABLED:-true}"
 WEBRTC_STUN_TIMEOUT_SECS="${WEBRTC_STUN_TIMEOUT_SECS:-8}"
 AUTHORIZED_KEYS="${AUTHORIZED_KEYS:-}"
-INSECURE_ALLOW_ANY_CLIENT="${INSECURE_ALLOW_ANY_CLIENT:-true}"
+INSECURE_ALLOW_ANY_CLIENT="${INSECURE_ALLOW_ANY_CLIENT:-false}"
 START_AGENT="${START_AGENT:-true}"
 AGENT_LOG_PATH="${AGENT_LOG_PATH:-$HOME/robotunnel-agent.log}"
 AGENT_PID_PATH="${AGENT_PID_PATH:-$HOME/robotunnel-agent.pid}"
@@ -486,7 +486,17 @@ REGISTERED_AGENT_ID=""
 REGISTERED_AGENT_AUTH_KEYS=""
 
 register_robot
-fetch_agent_authorized_keys || true
+if ! fetch_agent_authorized_keys; then
+  if bool_true "${INSECURE_ALLOW_ANY_CLIENT}"; then
+    echo "[WARN] continuing without authorized keys because INSECURE_ALLOW_ANY_CLIENT=true"
+  elif [[ -n "${AUTHORIZED_KEYS// }" ]]; then
+    echo "[WARN] platform authorized keys fetch failed; continuing with configured AUTHORIZED_KEYS"
+  else
+    echo "[ERROR] failed to fetch platform authorized keys and no AUTHORIZED_KEYS configured." >&2
+    echo "[ERROR] Refusing to continue in secure mode. Set INSECURE_ALLOW_ANY_CLIENT=true only for explicit local development." >&2
+    exit 1
+  fi
+fi
 write_agent_config
 start_agent
 

@@ -18,7 +18,8 @@
 //! ```
 //!
 //! # Signaling Protocol
-//! Agent connects to `wss://platform/api/signal/{robot_id}?role=agent&api_key=...`
+//! Agent connects to `wss://platform/api/signal/{robot_id}?role=agent`
+//! with `X-Robot-API-Key` header.
 //! Messages: JSON `SignalMessage` structs (type: offer/answer/ice-candidate/bye)
 
 pub mod client;
@@ -66,10 +67,9 @@ pub struct WebRtcConfig {
 impl WebRtcConfig {
     pub fn signaling_url(&self) -> String {
         let mut url = format!(
-            "{}/api/signal/{}?role=agent&api_key={}",
+            "{}/api/signal/{}?role=agent",
             self.signaling_base_url(),
-            self.robot_id,
-            self.api_key
+            self.robot_id
         );
         if let Some(id) = &self.bootstrap_id {
             url.push_str(&format!("&bootstrap_id={}", id));
@@ -79,9 +79,8 @@ impl WebRtcConfig {
 
     pub fn turn_credentials_url(&self) -> String {
         let mut url = format!(
-            "{}/api/turn-credentials?api_key={}&robot_id={}",
+            "{}/api/turn-credentials?robot_id={}",
             self.http_base_url(),
-            self.api_key,
             self.robot_id
         );
         if let Some(id) = &self.bootstrap_id {
@@ -137,11 +136,11 @@ mod tests {
         let cfg = make_cfg("https://api.robotunnel.io/");
         assert_eq!(
             cfg.signaling_url(),
-            "wss://api.robotunnel.io/api/signal/robot-123?role=agent&api_key=rob_test"
+            "wss://api.robotunnel.io/api/signal/robot-123?role=agent"
         );
         assert_eq!(
             cfg.turn_credentials_url(),
-            "https://api.robotunnel.io/api/turn-credentials?api_key=rob_test&robot_id=robot-123"
+            "https://api.robotunnel.io/api/turn-credentials?robot_id=robot-123"
         );
     }
 
@@ -150,11 +149,11 @@ mod tests {
         let cfg = make_cfg("wss://api.robotunnel.io");
         assert_eq!(
             cfg.signaling_url(),
-            "wss://api.robotunnel.io/api/signal/robot-123?role=agent&api_key=rob_test"
+            "wss://api.robotunnel.io/api/signal/robot-123?role=agent"
         );
         assert_eq!(
             cfg.turn_credentials_url(),
-            "https://api.robotunnel.io/api/turn-credentials?api_key=rob_test&robot_id=robot-123"
+            "https://api.robotunnel.io/api/turn-credentials?robot_id=robot-123"
         );
     }
 }

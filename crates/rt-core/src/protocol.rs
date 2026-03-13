@@ -124,6 +124,13 @@ pub struct WebRtcBootstrapPayload {
     pub cli_lan_cidr: Option<String>,
 }
 
+/// JSON payload for WebRtcTeardown frame.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebRtcTeardownPayload {
+    #[serde(default)]
+    pub bootstrap_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum CommandStatus {

@@ -34,10 +34,10 @@ HEARTBEAT_INTERVAL_SECS="30"
 LOG_LEVEL="info"
 # Comma-separated Ed25519 public keys allowed to connect to the local tunnel.
 # When left empty, the installer auto-fetches the platform gateway public key.
-# If that fetch fails, it falls back to insecure_allow_any_client=true for bootstrap convenience.
+# If that fetch fails, install will stop unless you explicitly set INSECURE_ALLOW_ANY_CLIENT=true.
 AUTHORIZED_KEYS=""
-# Set to false after AUTHORIZED_KEYS is configured.
-INSECURE_ALLOW_ANY_CLIENT="true"
+# Keep false in normal deployments. Set true only for explicit local development.
+INSECURE_ALLOW_ANY_CLIENT="false"
 WEBRTC_ENABLED="true"
 WEBRTC_ROBOT_ID=""
 WEBRTC_STUN_TIMEOUT_SECS="8"

@@ -14,9 +14,9 @@ Env alternatives:
   API_URL=... API_KEY=... ROBOT_ID=... ./scripts/webrtc-preflight.sh
 
 Checks:
-  1) GET /api/agent/authorized-keys?api_key=...
-  2) GET /api/turn-credentials?robot_id=...&api_key=...
-  3) WebSocket upgrade /api/signal/<robot_id>?role=agent&api_key=...
+  1) GET /api/agent/authorized-keys (+ X-Robot-API-Key header)
+  2) GET /api/turn-credentials?robot_id=... (+ X-Robot-API-Key header)
+  3) WebSocket upgrade /api/signal/<robot_id>?role=agent (+ X-Robot-API-Key header)
 USAGE
 }
 
@@ -61,7 +61,13 @@ http_probe() {
   local body_file
   body_file="$(mktemp)"
   local code
-  code="$(curl -sS -o "${body_file}" -w "%{http_code}" "${url}" || true)"
+  code="$(
+    curl -sS \
+      -o "${body_file}" \
+      -w "%{http_code}" \
+      -H "X-Robot-API-Key: ${API_KEY}" \
+      "${url}" || true
+  )"
 
   echo "[CHECK] ${name}"
   echo "  url : ${url}"
@@ -86,7 +92,7 @@ http_probe() {
 ws_upgrade_probe() {
   # WebSocket upgrade starts as an HTTP(S) request with Upgrade headers.
   # curl cannot dial wss:// directly, so probe the HTTPS endpoint instead.
-  local ws_url="${API_URL}/api/signal/${ROBOT_ID}?role=agent&api_key=${API_KEY}"
+  local ws_url="${API_URL}/api/signal/${ROBOT_ID}?role=agent"
 
   local body_file header_file
   body_file="$(mktemp)"
@@ -101,6 +107,7 @@ ws_upgrade_probe() {
       -H "Upgrade: websocket" \
       -H "Sec-WebSocket-Version: 13" \
       -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+      -H "X-Robot-API-Key: ${API_KEY}" \
       "${ws_url}" || true
   )"
 
@@ -120,7 +127,7 @@ ws_upgrade_probe() {
 }
 
 echo "[INFO] running WebRTC preflight..."
-http_probe "agent authorized keys" "${API_URL}/api/agent/authorized-keys?api_key=${API_KEY}"
-http_probe "turn credentials" "${API_URL}/api/turn-credentials?robot_id=${ROBOT_ID}&api_key=${API_KEY}"
+http_probe "agent authorized keys" "${API_URL}/api/agent/authorized-keys"
+http_probe "turn credentials" "${API_URL}/api/turn-credentials?robot_id=${ROBOT_ID}"
 ws_upgrade_probe
 echo "[OK] WebRTC control-plane preflight passed"
