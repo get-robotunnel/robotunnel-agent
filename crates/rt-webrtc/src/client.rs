@@ -19,6 +19,7 @@ use webrtc::{
         interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
         setting_engine::SettingEngine, APIBuilder,
     },
+    dtls::extension::extension_use_srtp::SrtpProtectionProfile,
     data_channel::RTCDataChannel,
     ice::network_type::NetworkType,
     ice_transport::{
@@ -132,6 +133,13 @@ async fn attempt_webrtc(
     let network_types = ice_network_types_from_env();
     let mut setting_engine = SettingEngine::default();
     setting_engine.set_network_types(network_types.clone());
+    // Avoid negotiating AEAD_AES_256_GCM with current stack versions.
+    // webrtc-srtp 0.14 panics when that profile is selected (expects 16-byte key, gets 32).
+    setting_engine.set_srtp_protection_profiles(vec![
+        SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
+        SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
+        SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32,
+    ]);
     info!(
         "WebRTC: ICE network types = {}",
         render_network_types(&network_types)
