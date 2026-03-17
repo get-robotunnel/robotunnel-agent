@@ -5,6 +5,7 @@
 //! - monitor background service
 //! - request dispatch into the application router
 
+mod assistant;
 mod contracts;
 mod monitor_config;
 
@@ -19,6 +20,7 @@ use rt_skill_acceptance::{AcceptanceReport, RobotObservation};
 use rt_skill_fleet::{FleetCompareReport, RobotTelemetry};
 use rt_skill_monitor::{MetricSnapshot, MonitorConfig, MonitorService};
 use rt_skill_ros2::Ros2Skill;
+use std::fs;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
@@ -49,9 +51,10 @@ pub fn build_application_router(broadcast_tx: broadcast::Sender<Vec<u8>>) -> Rou
 
     let ros2_skill = Arc::new(Ros2Skill::new("ws://localhost:9090"));
     let ros2_contracts = contracts.clone();
+    let ros2_skill_for_router = ros2_skill.clone();
     router.register("ros2", move |req, tx| {
         let contracts = ros2_contracts.clone();
-        let skill = ros2_skill.clone();
+        let skill = ros2_skill_for_router.clone();
         async move {
             if let Err(err) = contracts.validate(&req) {
                 return err_response(req.id, err);
@@ -76,6 +79,20 @@ pub fn build_application_router(broadcast_tx: broadcast::Sender<Vec<u8>>) -> Rou
         }
     });
     tracing::info!("registered skill: ros2 (target: ws://localhost:9090)");
+
+    let assistant_contracts = contracts.clone();
+    let assistant_ros2_skill = ros2_skill.clone();
+    router.register("assistant", move |req, tx| {
+        let contracts = assistant_contracts.clone();
+        let ros2_skill = assistant_ros2_skill.clone();
+        async move {
+            if let Err(err) = contracts.validate(&req) {
+                return err_response(req.id, err);
+            }
+            assistant::handle_assistant_skill(req, tx, contracts, ros2_skill).await
+        }
+    });
+    tracing::info!("registered skill: assistant");
 
     let monitor_contracts = contracts.clone();
     router.register("monitor", move |req, _tx| {
@@ -114,6 +131,88 @@ pub fn build_application_router(broadcast_tx: broadcast::Sender<Vec<u8>>) -> Rou
     tracing::info!("registered skill: acceptance");
 
     router
+}
+
+pub fn collect_control_plane_status() -> serde_json::Value {
+    let mut payload = serde_json::Map::new();
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    payload.insert(
+        "timestamp_unix".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(now_unix)),
+    );
+    payload.insert(
+        "hostname".to_string(),
+        serde_json::Value::String(hostname_text()),
+    );
+
+    if let Some(uptime_secs) = read_uptime_secs() {
+        payload.insert(
+            "uptime_secs".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(uptime_secs)),
+        );
+    }
+
+    match MetricSnapshot::collect() {
+        Ok(snap) => {
+            payload.insert(
+                "cpu_percent".to_string(),
+                serde_json::json!(snap.cpu_percent),
+            );
+            payload.insert(
+                "mem_percent".to_string(),
+                serde_json::json!(snap.mem_percent()),
+            );
+            payload.insert(
+                "disk_used_gb".to_string(),
+                serde_json::json!(snap.disk_used_gb),
+            );
+            payload.insert(
+                "disk_total_gb".to_string(),
+                serde_json::json!(snap.disk_total_gb),
+            );
+            payload.insert(
+                "sample_timestamp_unix".to_string(),
+                serde_json::json!(snap.timestamp_unix),
+            );
+        }
+        Err(err) => {
+            payload.insert(
+                "error".to_string(),
+                serde_json::Value::String(format!("metric collection failed: {}", err)),
+            );
+        }
+    }
+
+    serde_json::Value::Object(payload)
+}
+
+fn hostname_text() -> String {
+    if let Ok(hostname) = std::env::var("HOSTNAME") {
+        let value = hostname.trim().to_string();
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    if let Ok(raw) = fs::read_to_string("/etc/hostname") {
+        let value = raw.trim().to_string();
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    "unknown".to_string()
+}
+
+fn read_uptime_secs() -> Option<u64> {
+    let raw = fs::read_to_string("/proc/uptime").ok()?;
+    let first = raw.split_whitespace().next()?;
+    let secs = first.parse::<f64>().ok()?;
+    if secs.is_sign_negative() {
+        return None;
+    }
+    Some(secs.floor() as u64)
 }
 
 pub fn start_monitor_service_if_enabled(
@@ -179,7 +278,10 @@ pub fn start_monitor_service_if_enabled(
     }))
 }
 
-async fn handle_system_skill(req: CommandRequest, contracts: &BuiltinContracts) -> CommandResponse {
+pub(super) async fn handle_system_skill(
+    req: CommandRequest,
+    contracts: &BuiltinContracts,
+) -> CommandResponse {
     if let Err(err) = contracts.validate(&req) {
         return err_response(req.id, err);
     }
@@ -301,7 +403,7 @@ pub async fn dispatch_request(
     }
 }
 
-async fn handle_monitor_skill(req: CommandRequest) -> CommandResponse {
+pub(super) async fn handle_monitor_skill(req: CommandRequest) -> CommandResponse {
     match req.action.as_str() {
         "snapshot" | "status" => match MetricSnapshot::collect() {
             Ok(snap) => ok_response(
@@ -323,7 +425,7 @@ async fn handle_monitor_skill(req: CommandRequest) -> CommandResponse {
     }
 }
 
-async fn handle_fleet_skill(req: CommandRequest) -> CommandResponse {
+pub(super) async fn handle_fleet_skill(req: CommandRequest) -> CommandResponse {
     if req.action != "compare" {
         return err_response(req.id, format!("unknown fleet action: {}", req.action));
     }
@@ -359,7 +461,7 @@ async fn handle_fleet_skill(req: CommandRequest) -> CommandResponse {
     }
 }
 
-async fn handle_acceptance_skill(req: CommandRequest) -> CommandResponse {
+pub(super) async fn handle_acceptance_skill(req: CommandRequest) -> CommandResponse {
     if req.action != "run" && req.action != "test" {
         return err_response(req.id, format!("unknown acceptance action: {}", req.action));
     }

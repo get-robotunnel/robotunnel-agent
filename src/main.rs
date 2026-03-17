@@ -13,6 +13,7 @@ use application::MonitorSettings;
 use clap::{Parser, Subcommand};
 use rt_core::authorized_keys::AuthorizedKeysSyncService;
 use rt_core::config::AgentConfig;
+use rt_core::heartbeat::HeartbeatService;
 use rt_core::tunnel::TunnelServer;
 use rt_llm::{LlmManager, Provider};
 use std::sync::Arc;
@@ -156,6 +157,21 @@ async fn main() -> anyhow::Result<()> {
         config.platform.api_key.clone(),
     );
 
+    let heartbeat_handle = if let Some(api_key) = &config.platform.api_key {
+        let heartbeat = HeartbeatService::new(
+            config.platform.api_url.clone(),
+            api_key.clone(),
+            config.heartbeat.interval_secs,
+        );
+        let shutdown_rx = shutdown_rx.clone();
+        Some(tokio::spawn(async move {
+            heartbeat.run(shutdown_rx).await;
+        }))
+    } else {
+        tracing::warn!("no API key configured, heartbeat disabled");
+        None
+    };
+
     let authorized_keys_handle = if let Some(api_key) = &config.platform.api_key {
         let sync = AuthorizedKeysSyncService::new(
             config.platform.api_url.clone(),
@@ -216,6 +232,9 @@ async fn main() -> anyhow::Result<()> {
         handle.abort();
     }
     if let Some(handle) = monitor_handle {
+        handle.abort();
+    }
+    if let Some(handle) = heartbeat_handle {
         handle.abort();
     }
     if let Some(handle) = webrtc_handle {

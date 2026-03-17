@@ -48,6 +48,50 @@ impl BuiltinContracts {
     pub fn new() -> Self {
         let mut skills = BTreeMap::new();
         skills.insert(
+            "assistant",
+            SkillContract {
+                name: "assistant",
+                kind: "builtin",
+                description: "On-robot intent routing with local tool execution.",
+                actions: vec![ActionContract {
+                    name: "route",
+                    description: "Route a natural-language request to one local skill call.",
+                    params: vec![
+                        param(
+                            "query",
+                            ParamType::String,
+                            true,
+                            "Natural-language request text from user.",
+                        ),
+                        param(
+                            "context",
+                            ParamType::Object,
+                            false,
+                            "Conversation context from upstream channel.",
+                        ),
+                        param(
+                            "provider",
+                            ParamType::String,
+                            false,
+                            "LLM provider name for local intent planning.",
+                        ),
+                        param(
+                            "allow_risky",
+                            ParamType::Boolean,
+                            false,
+                            "Whether risky calls can execute immediately.",
+                        ),
+                        param(
+                            "force_call",
+                            ParamType::Object,
+                            false,
+                            "Approved explicit tool call to execute.",
+                        ),
+                    ],
+                }],
+            },
+        );
+        skills.insert(
             "system",
             SkillContract {
                 name: "system",
@@ -151,8 +195,49 @@ impl BuiltinContracts {
                     },
                     ActionContract {
                         name: "subscribe",
-                        description: "Subscribe to a ROS 2 topic stream.",
-                        params: vec![param("topic", ParamType::String, true, "ROS 2 topic name.")],
+                        description: "Collect real samples from a ROS 2 topic via ros2 CLI.",
+                        params: vec![
+                            param("topic", ParamType::String, true, "ROS 2 topic name."),
+                            param(
+                                "samples",
+                                ParamType::Integer,
+                                false,
+                                "Number of message samples to capture (default 1, max 10).",
+                            ),
+                            param(
+                                "timeout_sec",
+                                ParamType::Integer,
+                                false,
+                                "Per-sample timeout seconds (default 6).",
+                            ),
+                        ],
+                    },
+                    ActionContract {
+                        name: "topic_stats",
+                        description: "Collect topic hz/bandwidth/delay statistics.",
+                        params: vec![
+                            param("topic", ParamType::String, true, "ROS 2 topic name."),
+                            param(
+                                "window_sec",
+                                ParamType::Integer,
+                                false,
+                                "Sampling window in seconds.",
+                            ),
+                        ],
+                    },
+                    ActionContract {
+                        name: "stream_endpoint",
+                        description:
+                            "Return local bridge endpoints for Foxglove/rosbridge streaming.",
+                        params: vec![
+                            param(
+                                "transport",
+                                ParamType::String,
+                                false,
+                                "foxglove or rosbridge.",
+                            ),
+                            param("port", ParamType::Integer, false, "Override bridge port."),
+                        ],
                     },
                 ],
             },

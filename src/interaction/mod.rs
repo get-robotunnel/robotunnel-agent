@@ -4,6 +4,7 @@
 //! keeping the transport-specific framing isolated from business handlers.
 
 use crate::application;
+use base64::Engine as _;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use rt_core::authorized_keys::fetch_agent_bootstrap;
@@ -11,11 +12,14 @@ use rt_core::config::AgentConfig;
 use rt_core::protocol::{CommandRequest, CommandResponse, CommandStatus, FrameType};
 use rt_core::tunnel::IncomingCommand;
 use rt_webrtc::{ConnectionType, WebRtcConfig};
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, Instant};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 use webrtc::data_channel::RTCDataChannel;
 
@@ -215,6 +219,20 @@ struct AgentControlInbound {
     request_id: Option<String>,
     #[serde(default)]
     command: Option<serde_json::Value>,
+    #[serde(default)]
+    status_query: Option<serde_json::Value>,
+    #[serde(default)]
+    relay_id: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    data: Option<String>,
+}
+
+struct RelaySession {
+    write_tx: mpsc::Sender<Vec<u8>>,
+    reader_task: JoinHandle<()>,
+    writer_task: JoinHandle<()>,
 }
 
 pub fn start_control_plane_bridge_if_enabled(
@@ -328,7 +346,13 @@ pub fn start_control_plane_bridge_if_enabled(
             };
 
             let (mut write, mut read) = ws.split();
+            let (outbound_tx, mut outbound_rx) = mpsc::channel::<String>(512);
+            let (relay_closed_tx, mut relay_closed_rx) = mpsc::channel::<String>(128);
+            let mut relays: HashMap<String, RelaySession> = HashMap::new();
             let mut ping_tick = tokio::time::interval(Duration::from_secs(30));
+            let mut watchdog_tick = tokio::time::interval(Duration::from_secs(10));
+            let mut last_inbound = Instant::now();
+            let inbound_timeout = Duration::from_secs(75);
 
             loop {
                 tokio::select! {
@@ -338,9 +362,32 @@ pub fn start_control_plane_bridge_if_enabled(
                             break;
                         }
                     }
+                    _ = watchdog_tick.tick() => {
+                        if last_inbound.elapsed() > inbound_timeout {
+                            tracing::warn!(
+                                "[control] watchdog timeout: robot={} no inbound message for {}s, reconnecting",
+                                robot_id,
+                                inbound_timeout.as_secs()
+                            );
+                            break;
+                        }
+                    }
+                    Some(outbound) = outbound_rx.recv() => {
+                        if let Err(err) = write.send(Message::Text(outbound.into())).await {
+                            tracing::warn!("[control] outbound write failed: robot={} err={}", robot_id, err);
+                            break;
+                        }
+                    }
+                    Some(relay_id) = relay_closed_rx.recv() => {
+                        if let Some(relay) = relays.remove(&relay_id) {
+                            relay.reader_task.abort();
+                            relay.writer_task.abort();
+                        }
+                    }
                     maybe_msg = read.next() => {
                         match maybe_msg {
                             Some(Ok(Message::Text(text))) => {
+                                last_inbound = Instant::now();
                                 match serde_json::from_str::<AgentControlInbound>(&text) {
                                     Ok(msg) => {
                                         match msg.msg_type.as_str() {
@@ -432,11 +479,151 @@ pub fn start_control_plane_bridge_if_enabled(
                                                         serde_json::Value::String(key),
                                                     );
                                                 }
-
                                                 let outbound = serde_json::Value::Object(outbound).to_string();
-                                                if let Err(err) = write.send(Message::Text(outbound.into())).await {
-                                                    tracing::warn!("[control] command response write failed: robot={} err={}", robot_id, err);
+                                                if outbound_tx.send(outbound).await.is_err() {
                                                     break;
+                                                }
+                                            }
+                                            "status_request" => {
+                                                let session_key = normalize_optional_session_key(
+                                                    msg.session_key.clone(),
+                                                    msg.bootstrap_id.clone(),
+                                                );
+                                                let _query = msg.status_query;
+                                                let mut response = serde_json::Map::new();
+                                                response.insert(
+                                                    "status".to_string(),
+                                                    serde_json::Value::String("ok".to_string()),
+                                                );
+                                                response.insert(
+                                                    "data".to_string(),
+                                                    application::collect_control_plane_status(),
+                                                );
+
+                                                let mut outbound = serde_json::Map::new();
+                                                outbound.insert(
+                                                    "type".to_string(),
+                                                    serde_json::Value::String("status_response".to_string()),
+                                                );
+                                                outbound.insert(
+                                                    "request_id".to_string(),
+                                                    serde_json::Value::String(normalize_bootstrap_id(msg.request_id)),
+                                                );
+                                                outbound.insert(
+                                                    "response".to_string(),
+                                                    serde_json::Value::Object(response),
+                                                );
+                                                if let Some(key) = session_key {
+                                                    outbound.insert(
+                                                        "session_key".to_string(),
+                                                        serde_json::Value::String(key.clone()),
+                                                    );
+                                                    outbound.insert(
+                                                        "bootstrap_id".to_string(),
+                                                        serde_json::Value::String(key),
+                                                    );
+                                                }
+                                                let outbound = serde_json::Value::Object(outbound).to_string();
+                                                if outbound_tx.send(outbound).await.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                            "relay_open" => {
+                                                let relay_id = normalize_optional(msg.relay_id.clone());
+                                                let port = msg.port.unwrap_or_default();
+                                                if relay_id.is_none() || port == 0 {
+                                                    let outbound = relay_control_message(
+                                                        "relay_open_ack",
+                                                        relay_id.as_deref().unwrap_or(""),
+                                                        None,
+                                                        Some("error"),
+                                                        Some("invalid relay_open payload"),
+                                                    );
+                                                    let _ = outbound_tx.send(outbound).await;
+                                                    continue;
+                                                }
+                                                let relay_id = relay_id.unwrap_or_default();
+                                                if let Some(prev) = relays.remove(&relay_id) {
+                                                    prev.reader_task.abort();
+                                                    prev.writer_task.abort();
+                                                }
+                                                match open_local_relay(
+                                                    relay_id.clone(),
+                                                    port,
+                                                    outbound_tx.clone(),
+                                                    relay_closed_tx.clone(),
+                                                ).await {
+                                                    Ok(relay) => {
+                                                        relays.insert(relay_id.clone(), relay);
+                                                        let outbound = relay_control_message(
+                                                            "relay_open_ack",
+                                                            &relay_id,
+                                                            None,
+                                                            Some("ok"),
+                                                            None,
+                                                        );
+                                                        let _ = outbound_tx.send(outbound).await;
+                                                    }
+                                                    Err(err) => {
+                                                        let outbound = relay_control_message(
+                                                            "relay_open_ack",
+                                                            &relay_id,
+                                                            None,
+                                                            Some("error"),
+                                                            Some(&err),
+                                                        );
+                                                        let _ = outbound_tx.send(outbound).await;
+                                                    }
+                                                }
+                                            }
+                                            "relay_data" => {
+                                                let relay_id = normalize_optional(msg.relay_id.clone()).unwrap_or_default();
+                                                let raw = normalize_optional(msg.data.clone()).unwrap_or_default();
+                                                if relay_id.is_empty() || raw.is_empty() {
+                                                    continue;
+                                                }
+                                                let decoded = match base64::engine::general_purpose::STANDARD.decode(raw.as_bytes()) {
+                                                    Ok(v) => v,
+                                                    Err(err) => {
+                                                        tracing::warn!("[control] relay_data decode failed relay={} err={}", relay_id, err);
+                                                        continue;
+                                                    }
+                                                };
+                                                let relay_write_tx = relays.get(&relay_id).map(|relay| relay.write_tx.clone());
+                                                if let Some(write_tx) = relay_write_tx {
+                                                    if write_tx.send(decoded).await.is_err() {
+                                                        if let Some(stale) = relays.remove(&relay_id) {
+                                                            stale.reader_task.abort();
+                                                            stale.writer_task.abort();
+                                                        }
+                                                        let outbound = relay_control_message(
+                                                            "relay_close",
+                                                            &relay_id,
+                                                            None,
+                                                            None,
+                                                            Some("relay write channel closed"),
+                                                        );
+                                                        let _ = outbound_tx.send(outbound).await;
+                                                    }
+                                                } else {
+                                                    let outbound = relay_control_message(
+                                                        "relay_close",
+                                                        &relay_id,
+                                                        None,
+                                                        None,
+                                                        Some("relay not found"),
+                                                    );
+                                                    let _ = outbound_tx.send(outbound).await;
+                                                }
+                                            }
+                                            "relay_close" => {
+                                                let relay_id = normalize_optional(msg.relay_id.clone()).unwrap_or_default();
+                                                if relay_id.is_empty() {
+                                                    continue;
+                                                }
+                                                if let Some(relay) = relays.remove(&relay_id) {
+                                                    relay.reader_task.abort();
+                                                    relay.writer_task.abort();
                                                 }
                                             }
                                             other => {
@@ -450,10 +637,14 @@ pub fn start_control_plane_bridge_if_enabled(
                                 }
                             }
                             Some(Ok(Message::Ping(payload))) => {
+                                last_inbound = Instant::now();
                                 if let Err(err) = write.send(Message::Pong(payload)).await {
                                     tracing::warn!("[control] pong write failed: robot={} err={}", robot_id, err);
                                     break;
                                 }
+                            }
+                            Some(Ok(Message::Pong(_))) => {
+                                last_inbound = Instant::now();
                             }
                             Some(Ok(Message::Close(_))) => {
                                 tracing::info!("[control] platform closed control channel: robot={}", robot_id);
@@ -471,10 +662,18 @@ pub fn start_control_plane_bridge_if_enabled(
                         }
                     }
                     _ = shutdown_rx.changed() => {
+                        for (_, relay) in relays.drain() {
+                            relay.reader_task.abort();
+                            relay.writer_task.abort();
+                        }
                         let _ = write.send(Message::Close(None)).await;
                         return;
                     }
                 }
+            }
+            for (_, relay) in relays.drain() {
+                relay.reader_task.abort();
+                relay.writer_task.abort();
             }
 
             tokio::select! {
@@ -496,6 +695,129 @@ async fn resolve_robot_id_from_platform(api_url: &str, api_key: &str) -> Option<
             None
         }
     }
+}
+
+async fn open_local_relay(
+    relay_id: String,
+    port: u16,
+    outbound_tx: mpsc::Sender<String>,
+    relay_closed_tx: mpsc::Sender<String>,
+) -> Result<RelaySession, String> {
+    let target = format!("127.0.0.1:{}", port);
+    let stream = TcpStream::connect(&target)
+        .await
+        .map_err(|err| format!("connect {} failed: {}", target, err))?;
+    let (mut read_half, mut write_half) = tokio::io::split(stream);
+    let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(256);
+
+    let relay_id_writer = relay_id.clone();
+    let relay_closed_writer = relay_closed_tx.clone();
+    let writer_task = tokio::spawn(async move {
+        while let Some(chunk) = write_rx.recv().await {
+            if let Err(err) = write_half.write_all(&chunk).await {
+                tracing::warn!(
+                    "[control] relay writer failed relay={} err={}",
+                    relay_id_writer,
+                    err
+                );
+                break;
+            }
+        }
+        let _ = write_half.shutdown().await;
+        let _ = relay_closed_writer.send(relay_id_writer).await;
+    });
+
+    let relay_id_reader = relay_id.clone();
+    let relay_closed_reader = relay_closed_tx.clone();
+    let outbound_reader = outbound_tx.clone();
+    let reader_task = tokio::spawn(async move {
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            match read_half.read(&mut buf).await {
+                Ok(0) => {
+                    let outbound = relay_control_message(
+                        "relay_close",
+                        &relay_id_reader,
+                        None,
+                        None,
+                        Some("relay target closed"),
+                    );
+                    let _ = outbound_reader.send(outbound).await;
+                    break;
+                }
+                Ok(n) => {
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
+                    let outbound = relay_control_message(
+                        "relay_data",
+                        &relay_id_reader,
+                        Some(encoded),
+                        None,
+                        None,
+                    );
+                    if outbound_reader.send(outbound).await.is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "[control] relay reader failed relay={} err={}",
+                        relay_id_reader,
+                        err
+                    );
+                    let outbound = relay_control_message(
+                        "relay_close",
+                        &relay_id_reader,
+                        None,
+                        None,
+                        Some(&format!("relay read error: {}", err)),
+                    );
+                    let _ = outbound_reader.send(outbound).await;
+                    break;
+                }
+            }
+        }
+        let _ = relay_closed_reader.send(relay_id_reader).await;
+    });
+
+    Ok(RelaySession {
+        write_tx,
+        reader_task,
+        writer_task,
+    })
+}
+
+fn relay_control_message(
+    msg_type: &str,
+    relay_id: &str,
+    data: Option<String>,
+    status: Option<&str>,
+    error: Option<&str>,
+) -> String {
+    let mut outbound = serde_json::Map::new();
+    outbound.insert(
+        "type".to_string(),
+        serde_json::Value::String(msg_type.to_string()),
+    );
+    outbound.insert(
+        "relay_id".to_string(),
+        serde_json::Value::String(relay_id.to_string()),
+    );
+    if let Some(v) = data {
+        outbound.insert("data".to_string(), serde_json::Value::String(v));
+    }
+    if let Some(v) = status {
+        outbound.insert(
+            "status".to_string(),
+            serde_json::Value::String(v.to_string()),
+        );
+    }
+    if let Some(v) = error {
+        outbound.insert(
+            "error".to_string(),
+            serde_json::Value::String(v.to_string()),
+        );
+    }
+    serde_json::Value::Object(outbound).to_string()
 }
 
 fn normalize_robot_id(value: &str) -> Option<String> {

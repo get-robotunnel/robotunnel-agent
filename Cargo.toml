@@ -35,7 +35,8 @@ serde_json = "1"
 webrtc = "0.12"
 bytes = "1"
 uuid = { version = "1.8", features = ["v4", "serde"] }
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["native-tls-vendored"] }
+base64 = "0.22"
 
 [profile.release]
 strip = true
