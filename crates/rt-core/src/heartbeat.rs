@@ -17,6 +17,20 @@ struct HeartbeatPayload {
     api_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     local_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_profile: Option<NetworkProfilePayload>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct NetworkProfilePayload {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    private_addrs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    public_ip_hint: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    transport_caps: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    network_tags: Vec<String>,
 }
 
 impl HeartbeatService {
@@ -63,6 +77,7 @@ impl HeartbeatService {
         let payload = HeartbeatPayload {
             api_key: self.api_key.clone(),
             local_ip: local_ip.map(|s| s.to_string()),
+            network_profile: build_network_profile(local_ip),
         };
 
         match self.client.post(&url).json(&payload).send().await {
@@ -78,6 +93,26 @@ impl HeartbeatService {
             }
         }
     }
+}
+
+fn build_network_profile(local_ip: Option<&str>) -> Option<NetworkProfilePayload> {
+    let mut private_addrs = Vec::new();
+    if let Some(ip) = local_ip.map(str::trim).filter(|s| !s.is_empty()) {
+        private_addrs.push(ip.to_string());
+    }
+
+    Some(NetworkProfilePayload {
+        private_addrs,
+        public_ip_hint: None,
+        transport_caps: vec![
+            "lan_tcp".to_string(),
+            "public_tcp".to_string(),
+            "stun_p2p".to_string(),
+            "turn_relay".to_string(),
+            "vps_relay".to_string(),
+        ],
+        network_tags: Vec::new(),
+    })
 }
 
 /// Best-effort local IP detection.
@@ -100,10 +135,12 @@ mod tests {
         let payload = HeartbeatPayload {
             api_key: "rob_test123".to_string(),
             local_ip: Some("192.168.1.100".to_string()),
+            network_profile: build_network_profile(Some("192.168.1.100")),
         };
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("rob_test123"));
         assert!(json.contains("192.168.1.100"));
+        assert!(json.contains("network_profile"));
     }
 
     #[test]
@@ -111,9 +148,11 @@ mod tests {
         let payload = HeartbeatPayload {
             api_key: "rob_test".to_string(),
             local_ip: None,
+            network_profile: build_network_profile(None),
         };
         let json = serde_json::to_string(&payload).unwrap();
-        assert!(!json.contains("local_ip"));
+        assert!(!json.contains("\"local_ip\""));
+        assert!(json.contains("network_profile"));
     }
 
     #[test]

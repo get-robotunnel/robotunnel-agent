@@ -157,6 +157,14 @@ pub enum FrameType {
     WebRtcBootstrap = 0x20,
     /// Terminate WebRTC resources (Platform -> Agent)
     WebRtcTeardown = 0x21,
+    /// Open a relay stream on top of WebRTC datachannel.
+    RelayOpen = 0x30,
+    /// Relay open acknowledgement.
+    RelayOpenAck = 0x31,
+    /// Relay data chunk.
+    RelayData = 0x32,
+    /// Relay stream close signal.
+    RelayClose = 0x33,
 }
 
 impl TryFrom<u8> for FrameType {
@@ -171,6 +179,10 @@ impl TryFrom<u8> for FrameType {
             0x11 => Ok(FrameType::Pong),
             0x20 => Ok(FrameType::WebRtcBootstrap),
             0x21 => Ok(FrameType::WebRtcTeardown),
+            0x30 => Ok(FrameType::RelayOpen),
+            0x31 => Ok(FrameType::RelayOpenAck),
+            0x32 => Ok(FrameType::RelayData),
+            0x33 => Ok(FrameType::RelayClose),
             _ => Err(ProtocolError::InvalidPacket(format!(
                 "unknown frame type: 0x{:02x}",
                 value

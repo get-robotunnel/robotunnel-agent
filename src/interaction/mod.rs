@@ -136,15 +136,34 @@ pub fn start_webrtc_bridge_if_enabled(
                             Box::pin(async {})
                         }));
 
+                        let (relay_out_tx, mut relay_out_rx) = mpsc::channel::<Vec<u8>>(512);
+                        let (relay_closed_tx, mut relay_closed_rx) = mpsc::channel::<String>(128);
+                        let relay_ctx = Arc::new(WebRtcRelayContext::new(
+                            relay_out_tx.clone(),
+                            relay_closed_tx.clone(),
+                        ));
+                        let dc_writer = dc.clone();
+                        let relay_send_task = tokio::spawn(async move {
+                            while let Some(frame) = relay_out_rx.recv().await {
+                                if let Err(err) = dc_writer.send(&Bytes::from(frame)).await {
+                                    tracing::warn!("webrtc relay outbound send failed: {}", err);
+                                    break;
+                                }
+                            }
+                        });
+
                         let mut is_teardown = false;
                         loop {
                             tokio::select! {
                                 Some(p) = dc_payload_rx.recv() => {
-                                    handle_webrtc_payload(p, &command_tx, &dc).await;
+                                    handle_webrtc_payload(p, &command_tx, &dc, relay_ctx.clone()).await;
                                 }
                                 Some(_) = dc_closed_rx.recv() => {
                                     tracing::warn!("[BOOTSTRAP:{}] webrtc datachannel closed", bootstrap_id);
                                     break;
+                                }
+                                Some(relay_id) = relay_closed_rx.recv() => {
+                                    relay_ctx.handle_local_relay_closed(relay_id).await;
                                 }
                                 Some(teardown) = webrtc_teardown_rx.recv() => {
                                     if teardown_matches(&teardown, &bootstrap_id) {
@@ -159,6 +178,8 @@ pub fn start_webrtc_bridge_if_enabled(
                                 }
                             }
                         }
+                        relay_ctx.shutdown().await;
+                        relay_send_task.abort();
 
                         if *shutdown_rx.borrow() || is_teardown {
                             break; // Exit connection loop
@@ -233,6 +254,126 @@ struct RelaySession {
     write_tx: mpsc::Sender<Vec<u8>>,
     reader_task: JoinHandle<()>,
     writer_task: JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct WebRtcRelayFrame {
+    #[serde(default)]
+    relay_id: String,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    data: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+struct WebRtcRelayContext {
+    relays: tokio::sync::Mutex<HashMap<String, RelaySession>>,
+    outbound_tx: mpsc::Sender<Vec<u8>>,
+    relay_closed_tx: mpsc::Sender<String>,
+}
+
+impl WebRtcRelayContext {
+    fn new(outbound_tx: mpsc::Sender<Vec<u8>>, relay_closed_tx: mpsc::Sender<String>) -> Self {
+        Self {
+            relays: tokio::sync::Mutex::new(HashMap::new()),
+            outbound_tx,
+            relay_closed_tx,
+        }
+    }
+
+    async fn open_relay(&self, relay_id: String, port: u16) -> Result<(), String> {
+        let relay_id = relay_id.trim().to_string();
+        if relay_id.is_empty() || port == 0 {
+            return Err("invalid relay_open payload".to_string());
+        }
+
+        let mut relays = self.relays.lock().await;
+        if let Some(prev) = relays.remove(&relay_id) {
+            prev.reader_task.abort();
+            prev.writer_task.abort();
+        }
+        let relay = open_local_webrtc_relay(
+            relay_id.clone(),
+            port,
+            self.outbound_tx.clone(),
+            self.relay_closed_tx.clone(),
+        )
+        .await?;
+        relays.insert(relay_id, relay);
+        Ok(())
+    }
+
+    async fn write_relay(&self, relay_id: &str, chunk: Vec<u8>) -> Result<(), String> {
+        let relay_id = relay_id.trim();
+        if relay_id.is_empty() {
+            return Err("relay_id is required".to_string());
+        }
+        let write_tx = {
+            let relays = self.relays.lock().await;
+            relays.get(relay_id).map(|relay| relay.write_tx.clone())
+        };
+
+        if let Some(tx) = write_tx {
+            if tx.send(chunk).await.is_err() {
+                let mut relays = self.relays.lock().await;
+                if let Some(stale) = relays.remove(relay_id) {
+                    stale.reader_task.abort();
+                    stale.writer_task.abort();
+                }
+                return Err("relay write channel closed".to_string());
+            }
+            return Ok(());
+        }
+        Err("relay not found".to_string())
+    }
+
+    async fn close_relay(&self, relay_id: &str) {
+        let relay_id = relay_id.trim();
+        if relay_id.is_empty() {
+            return;
+        }
+        let mut relays = self.relays.lock().await;
+        if let Some(relay) = relays.remove(relay_id) {
+            relay.reader_task.abort();
+            relay.writer_task.abort();
+        }
+    }
+
+    async fn handle_local_relay_closed(&self, relay_id: String) {
+        let relay_id = relay_id.trim().to_string();
+        if relay_id.is_empty() {
+            return;
+        }
+        {
+            let mut relays = self.relays.lock().await;
+            if let Some(relay) = relays.remove(&relay_id) {
+                relay.reader_task.abort();
+                relay.writer_task.abort();
+            }
+        }
+        let _ = send_webrtc_relay_event(
+            &self.outbound_tx,
+            FrameType::RelayClose,
+            &WebRtcRelayFrame {
+                relay_id,
+                error: Some("relay target closed".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+
+    async fn shutdown(&self) {
+        let mut relays = self.relays.lock().await;
+        for (_, relay) in relays.drain() {
+            relay.reader_task.abort();
+            relay.writer_task.abort();
+        }
+    }
 }
 
 pub fn start_control_plane_bridge_if_enabled(
@@ -786,6 +927,113 @@ async fn open_local_relay(
     })
 }
 
+async fn open_local_webrtc_relay(
+    relay_id: String,
+    port: u16,
+    outbound_tx: mpsc::Sender<Vec<u8>>,
+    relay_closed_tx: mpsc::Sender<String>,
+) -> Result<RelaySession, String> {
+    let target = format!("127.0.0.1:{}", port);
+    let stream = TcpStream::connect(&target)
+        .await
+        .map_err(|err| format!("connect {} failed: {}", target, err))?;
+    let (mut read_half, mut write_half) = tokio::io::split(stream);
+    let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(256);
+
+    let relay_id_writer = relay_id.clone();
+    let relay_closed_writer = relay_closed_tx.clone();
+    let writer_task = tokio::spawn(async move {
+        while let Some(chunk) = write_rx.recv().await {
+            if let Err(err) = write_half.write_all(&chunk).await {
+                tracing::warn!(
+                    "[webrtc] relay writer failed relay={} err={}",
+                    relay_id_writer,
+                    err
+                );
+                break;
+            }
+        }
+        let _ = write_half.shutdown().await;
+        let _ = relay_closed_writer.send(relay_id_writer).await;
+    });
+
+    let relay_id_reader = relay_id.clone();
+    let relay_closed_reader = relay_closed_tx.clone();
+    let outbound_reader = outbound_tx.clone();
+    let reader_task = tokio::spawn(async move {
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            match read_half.read(&mut buf).await {
+                Ok(0) => {
+                    let _ = send_webrtc_relay_event(
+                        &outbound_reader,
+                        FrameType::RelayClose,
+                        &WebRtcRelayFrame {
+                            relay_id: relay_id_reader.clone(),
+                            error: Some("relay target closed".to_string()),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                    break;
+                }
+                Ok(n) => {
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
+                    let _ = send_webrtc_relay_event(
+                        &outbound_reader,
+                        FrameType::RelayData,
+                        &WebRtcRelayFrame {
+                            relay_id: relay_id_reader.clone(),
+                            data: Some(encoded),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "[webrtc] relay reader failed relay={} err={}",
+                        relay_id_reader,
+                        err
+                    );
+                    let _ = send_webrtc_relay_event(
+                        &outbound_reader,
+                        FrameType::RelayClose,
+                        &WebRtcRelayFrame {
+                            relay_id: relay_id_reader.clone(),
+                            error: Some(format!("relay read error: {}", err)),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                    break;
+                }
+            }
+        }
+        let _ = relay_closed_reader.send(relay_id_reader).await;
+    });
+
+    Ok(RelaySession {
+        write_tx,
+        reader_task,
+        writer_task,
+    })
+}
+
+async fn send_webrtc_relay_event(
+    outbound_tx: &mpsc::Sender<Vec<u8>>,
+    frame_type: FrameType,
+    frame: &WebRtcRelayFrame,
+) -> Result<(), String> {
+    let data = serde_json::to_vec(frame)
+        .map_err(|err| format!("serialize webrtc relay payload failed: {}", err))?;
+    let encoded = encode_v2_frame(frame_type, &data);
+    outbound_tx
+        .send(encoded)
+        .await
+        .map_err(|_| "webrtc relay outbound channel closed".to_string())
+}
+
 fn relay_control_message(
     msg_type: &str,
     relay_id: &str,
@@ -890,6 +1138,7 @@ async fn handle_webrtc_payload(
     payload: Vec<u8>,
     command_tx: &mpsc::Sender<IncomingCommand>,
     dc: &Arc<RTCDataChannel>,
+    relay_ctx: Arc<WebRtcRelayContext>,
 ) {
     if payload.is_empty() {
         return;
@@ -916,6 +1165,78 @@ async fn handle_webrtc_payload(
                 if let Err(e) = dc.send(&bytes).await {
                     tracing::warn!("webrtc: send framed pong failed: {}", e);
                 }
+            }
+            FrameType::RelayOpen => {
+                let req = match serde_json::from_slice::<WebRtcRelayFrame>(frame_data) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::warn!("webrtc: invalid relay_open payload: {}", err);
+                        return;
+                    }
+                };
+                let relay_id = req.relay_id.trim().to_string();
+                let port = req.port.unwrap_or_default();
+                let result = relay_ctx.open_relay(relay_id.clone(), port).await;
+                let (status, error) = match result {
+                    Ok(()) => ("ok".to_string(), None),
+                    Err(err) => ("error".to_string(), Some(err)),
+                };
+                let _ = send_webrtc_relay_event(
+                    &relay_ctx.outbound_tx,
+                    FrameType::RelayOpenAck,
+                    &WebRtcRelayFrame {
+                        relay_id,
+                        status: Some(status),
+                        error,
+                        ..Default::default()
+                    },
+                )
+                .await;
+            }
+            FrameType::RelayData => {
+                let req = match serde_json::from_slice::<WebRtcRelayFrame>(frame_data) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::warn!("webrtc: invalid relay_data payload: {}", err);
+                        return;
+                    }
+                };
+                let relay_id = req.relay_id.trim().to_string();
+                let raw = req.data.unwrap_or_default();
+                if relay_id.is_empty() || raw.trim().is_empty() {
+                    return;
+                }
+                let decoded = match base64::engine::general_purpose::STANDARD.decode(raw.as_bytes())
+                {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::warn!(
+                            "webrtc: relay_data decode failed relay={} err={}",
+                            relay_id,
+                            err
+                        );
+                        return;
+                    }
+                };
+                if let Err(err) = relay_ctx.write_relay(&relay_id, decoded).await {
+                    let _ = send_webrtc_relay_event(
+                        &relay_ctx.outbound_tx,
+                        FrameType::RelayClose,
+                        &WebRtcRelayFrame {
+                            relay_id,
+                            error: Some(err),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                }
+            }
+            FrameType::RelayClose => {
+                let req = match serde_json::from_slice::<WebRtcRelayFrame>(frame_data) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                relay_ctx.close_relay(&req.relay_id).await;
             }
             _ => {
                 tracing::debug!("webrtc: ignoring framed type {:?}", frame_type);
