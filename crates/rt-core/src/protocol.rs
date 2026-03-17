@@ -266,7 +266,7 @@ mod tests {
     fn test_command_request_serialization() {
         let req = CommandRequest {
             id: "test-123".to_string(),
-            skill: "debug".to_string(),
+            skill: "host_debug".to_string(),
             action: "shell".to_string(),
             params: serde_json::json!({"cmd": "uptime"}),
         };
@@ -274,7 +274,7 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let decoded: CommandRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.id, "test-123");
-        assert_eq!(decoded.skill, "debug");
+        assert_eq!(decoded.skill, "host_debug");
     }
 
     #[test]

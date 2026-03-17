@@ -139,8 +139,8 @@ async fn main() -> anyhow::Result<()> {
         cmd_tx.clone(),
     );
 
-    let (webrtc_trigger_tx, webrtc_trigger_rx) = mpsc::channel(32);
-    let (webrtc_teardown_tx, webrtc_teardown_rx) = mpsc::channel(32);
+    let (webrtc_trigger_tx, webrtc_trigger_rx) = mpsc::channel(256);
+    let (webrtc_teardown_tx, webrtc_teardown_rx) = mpsc::channel(256);
     let control_trigger_tx = webrtc_trigger_tx.clone();
     let control_teardown_tx = webrtc_teardown_tx.clone();
     if config.webrtc.enabled {

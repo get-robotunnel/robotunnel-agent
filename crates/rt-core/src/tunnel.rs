@@ -320,7 +320,7 @@ mod tests {
         // Send a command request
         let req = CommandRequest {
             id: "test-1".to_string(),
-            skill: "debug".to_string(),
+            skill: "host_debug".to_string(),
             action: "shell".to_string(),
             params: serde_json::json!({"cmd": "echo hi"}),
         };
@@ -332,7 +332,7 @@ mod tests {
         // Server should receive command
         let incoming = cmd_rx.recv().await.unwrap();
         assert_eq!(incoming.request.id, "test-1");
-        assert_eq!(incoming.request.skill, "debug");
+        assert_eq!(incoming.request.skill, "host_debug");
 
         // Send response back
         let resp = CommandResponse {

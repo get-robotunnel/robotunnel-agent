@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-pub const BUILTIN_CONTRACT_VERSION: &str = "builtin-skill-contract/v1";
+pub const BUILTIN_CONTRACT_VERSION: &str = "builtin-skill-contract/v2";
 
 pub struct BuiltinContracts {
     skills: BTreeMap<&'static str, SkillContract>,
@@ -135,11 +135,11 @@ impl BuiltinContracts {
             },
         );
         skills.insert(
-            "debug",
+            "host_debug",
             SkillContract {
-                name: "debug",
+                name: "host_debug",
                 kind: "builtin",
-                description: "Robot debugging and operational inspection.",
+                description: "Host-level debugging and operational inspection.",
                 actions: vec![
                     ActionContract {
                         name: "status",
@@ -167,7 +167,8 @@ impl BuiltinContracts {
                     },
                     ActionContract {
                         name: "shell",
-                        description: "Execute a shell command when debug shell access is enabled.",
+                        description:
+                            "Execute a shell command when host debug shell access is enabled.",
                         params: vec![
                             param("cmd", ParamType::String, true, "Shell command to execute."),
                             param("timeout", ParamType::Integer, false, "Timeout in seconds."),
@@ -177,11 +178,11 @@ impl BuiltinContracts {
             },
         );
         skills.insert(
-            "ros2",
+            "ros2_observe",
             SkillContract {
-                name: "ros2",
+                name: "ros2_observe",
                 kind: "builtin",
-                description: "ROS 2 bridge operations.",
+                description: "ROS 2 observation and bridge operations.",
                 actions: vec![
                     ActionContract {
                         name: "list_topics",
@@ -237,6 +238,130 @@ impl BuiltinContracts {
                                 "foxglove or rosbridge.",
                             ),
                             param("port", ParamType::Integer, false, "Override bridge port."),
+                        ],
+                    },
+                ],
+            },
+        );
+        skills.insert(
+            "visual_debug",
+            SkillContract {
+                name: "visual_debug",
+                kind: "builtin",
+                description:
+                    "Debug Projection Plane controls for visual streaming profiles and session-local projection settings.",
+                actions: vec![
+                    ActionContract {
+                        name: "list_profiles",
+                        description:
+                            "List built-in projection profiles (bandwidth/quality presets).",
+                        params: vec![],
+                    },
+                    ActionContract {
+                        name: "start",
+                        description:
+                            "Start a visual debug projection session with session-local transport/filter settings.",
+                        params: vec![
+                            param(
+                                "mode",
+                                ParamType::String,
+                                false,
+                                "foxglove, rviz_vnc, or stats_only.",
+                            ),
+                            param(
+                                "transport_policy",
+                                ParamType::String,
+                                false,
+                                "Session transport preference, for example tcp_only.",
+                            ),
+                            param(
+                                "profile",
+                                ParamType::String,
+                                false,
+                                "Projection profile name such as balanced or lidar_low_bw.",
+                            ),
+                            param(
+                                "topics",
+                                ParamType::Array,
+                                false,
+                                "Optional list of ROS 2 topics to project.",
+                            ),
+                            param(
+                                "desired_delay_ms",
+                                ParamType::Integer,
+                                false,
+                                "Target visualization delay in milliseconds.",
+                            ),
+                            param(
+                                "point_stride",
+                                ParamType::Integer,
+                                false,
+                                "Sample one point every N points for point cloud projection.",
+                            ),
+                            param(
+                                "voxel_leaf_m",
+                                ParamType::Number,
+                                false,
+                                "Voxel grid leaf size in meters.",
+                            ),
+                            param(
+                                "image_scale",
+                                ParamType::Number,
+                                false,
+                                "Image downscale ratio in range (0, 1].",
+                            ),
+                            param(
+                                "hz_limit",
+                                ParamType::Number,
+                                false,
+                                "Optional output rate limit.",
+                            ),
+                            param(
+                                "vnc_port",
+                                ParamType::Integer,
+                                false,
+                                "Optional VNC port when mode=rviz_vnc.",
+                            ),
+                            param(
+                                "session_name",
+                                ParamType::String,
+                                false,
+                                "Optional operator-defined session label.",
+                            ),
+                        ],
+                    },
+                    ActionContract {
+                        name: "stop",
+                        description: "Stop a running visual debug projection session.",
+                        params: vec![param(
+                            "session_id",
+                            ParamType::String,
+                            true,
+                            "Projection session identifier.",
+                        )],
+                    },
+                    ActionContract {
+                        name: "status",
+                        description: "Read one projection session status or list all active sessions.",
+                        params: vec![param(
+                            "session_id",
+                            ParamType::String,
+                            false,
+                            "Optional projection session identifier.",
+                        )],
+                    },
+                    ActionContract {
+                        name: "topic_stats",
+                        description:
+                            "Collect topic frequency, bandwidth, and delay metrics via projection stats collector.",
+                        params: vec![
+                            param("topic", ParamType::String, true, "ROS 2 topic name."),
+                            param(
+                                "window_sec",
+                                ParamType::Integer,
+                                false,
+                                "Sampling window in seconds.",
+                            ),
                         ],
                     },
                 ],
@@ -457,7 +582,7 @@ mod tests {
         let registry = BuiltinContracts::new();
         let req = CommandRequest {
             id: "1".to_string(),
-            skill: "debug".to_string(),
+            skill: "host_debug".to_string(),
             action: "status".to_string(),
             params: json!({"extra": true}),
         };
@@ -470,7 +595,7 @@ mod tests {
         let registry = BuiltinContracts::new();
         let req = CommandRequest {
             id: "1".to_string(),
-            skill: "debug".to_string(),
+            skill: "host_debug".to_string(),
             action: "shell".to_string(),
             params: json!({}),
         };

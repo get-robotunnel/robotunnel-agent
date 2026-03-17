@@ -105,7 +105,7 @@ RoboTunnel `v0.3.x` introduces cross-host tracing for the connection layer:
 | Rust | 1.75+ (stable, only if build-from-source fallback is used) |
 | ROS 2 *(optional)* | Humble / Iron / Jazzy |
 
-> **Note**: Linux is required for native ROS 2 integration. The agent compiles on macOS for development, but `rt-skill-ros2` requires a sourced ROS 2 environment.
+> **Note**: Linux is required for native ROS 2 integration. The agent compiles on macOS for development, but ROS 2 observation/projection features require a sourced ROS 2 environment.
 
 ---
 
@@ -290,8 +290,8 @@ You can discover the machine-readable built-in skill contracts from the agent it
 robotunnel skill robot-abc123 system capabilities
 ```
 
-### 1. Remote Debug (`rt-skill-debug`)
-Stream ROS topics, view system logs, inspect processes — everything your local `ros2 topic echo` does, but over WAN with a stable persistent connection.
+### 1. Host Debug + ROS2 Observe + Visual Projection
+Use `host_debug` for host diagnostics, `ros2_observe` for ROS 2 introspection, and `visual_debug` for projection-plane session controls.
 
 ```bash
 # Primary CLI workflow: open the debug tunnel
@@ -301,9 +301,12 @@ ros2 topic list
 ros2 topic echo /joint_states
 
 # Direct skill actions are also available
-robotunnel skill robot-abc123 debug status
-robotunnel skill robot-abc123 debug logs --params '{"lines":50}'
-robotunnel skill robot-abc123 debug shell --params '{"cmd":"uptime"}'
+robotunnel skill robot-abc123 host_debug status
+robotunnel skill robot-abc123 host_debug logs --params '{"lines":50}'
+robotunnel skill robot-abc123 host_debug shell --params '{"cmd":"uptime"}'
+robotunnel skill robot-abc123 ros2_observe topic_stats --params '{"topic":"/scan","window_sec":8}'
+robotunnel skill robot-abc123 visual_debug list_profiles
+robotunnel skill robot-abc123 visual_debug start --params '{"mode":"foxglove","transport_policy":"tcp_only","profile":"balanced","desired_delay_ms":120}'
 ```
 
 ### 2. Proactive Fleet Monitoring (`rt-skill-monitor`)
@@ -369,7 +372,7 @@ rt alerts off [robot_selector|all]
 rt alerts off webhook <url> [robot_selector|all]
 ```
 
-In Discord DMs you can also just chat naturally without the `rt` prefix. In server channels, mention the bot and then ask normally. The platform-side Discord intent router sees the available robots, the current robot context for that conversation, and the published skill contracts, then emits one structured skill call, one fleet orchestration request, one read-only robot metadata lookup, or one context update. It does not execute arbitrary shell text on its own. Risky actions such as `debug.shell` and `system config_set` still require an explicit `rt confirm`.
+In Discord DMs you can also just chat naturally without the `rt` prefix. In server channels, mention the bot and then ask normally. The platform-side Discord intent router sees the available robots, the current robot context for that conversation, and the published skill contracts, then emits one structured skill call, one fleet orchestration request, one read-only robot metadata lookup, or one context update. It does not execute arbitrary shell text on its own. Risky actions such as `host_debug.shell` and `system config_set` still require an explicit `rt confirm`.
 
 The Discord interaction model now distinguishes between:
 
@@ -401,7 +404,7 @@ RoboTunnel is currently in private beta.
 
 | Version | Status | Highlights |
 |---|---|---|
-| v0.2.0 | ✅ Released | Ed25519 tunnel, debug skill, Kimi AI, Go platform |
+| v0.2.0 | ✅ Released | Ed25519 tunnel, host-debug skill baseline, Kimi AI, Go platform |
 | v0.2.3 | ✅ Released | WebRTC P2P, multi-LLM local keys, proactive monitoring, fleet compare, acceptance testing |
 | v0.3.0 | 🚧 Shipping soon | Trust Plane, end-to-end integration and validation, release binaries, CLI, Discord bot |
 | v0.4.x | 📋 Planned | Skill Platform — publish your robot's capabilities for others to discover and use |

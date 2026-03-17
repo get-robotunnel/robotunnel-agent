@@ -8,6 +8,8 @@
 mod assistant;
 mod contracts;
 mod monitor_config;
+mod projection_plane;
+mod visual_debug;
 
 use self::contracts::BuiltinContracts;
 pub use self::monitor_config::MonitorSettings;
@@ -29,6 +31,7 @@ use tokio::time::Duration;
 pub fn build_application_router(broadcast_tx: broadcast::Sender<Vec<u8>>) -> Router {
     let mut router = Router::new(broadcast_tx);
     let contracts = Arc::new(BuiltinContracts::new());
+    let projection_engine = Arc::new(projection_plane::ProjectionEngine::new());
 
     let system_contracts = contracts.clone();
     router.register("system", move |req, _tx| {
@@ -37,9 +40,9 @@ pub fn build_application_router(broadcast_tx: broadcast::Sender<Vec<u8>>) -> Rou
     });
     tracing::info!("registered skill: system");
 
-    let debug_contracts = contracts.clone();
-    router.register("debug", move |req, tx| {
-        let contracts = debug_contracts.clone();
+    let host_debug_contracts = contracts.clone();
+    router.register("host_debug", move |req, tx| {
+        let contracts = host_debug_contracts.clone();
         async move {
             if let Err(err) = contracts.validate(&req) {
                 return err_response(req.id, err);
@@ -47,14 +50,14 @@ pub fn build_application_router(broadcast_tx: broadcast::Sender<Vec<u8>>) -> Rou
             rt_skill_debug::handle(req, tx).await
         }
     });
-    tracing::info!("registered skill: debug");
+    tracing::info!("registered skill: host_debug");
 
-    let ros2_skill = Arc::new(Ros2Skill::new("ws://localhost:9090"));
-    let ros2_contracts = contracts.clone();
-    let ros2_skill_for_router = ros2_skill.clone();
-    router.register("ros2", move |req, tx| {
-        let contracts = ros2_contracts.clone();
-        let skill = ros2_skill_for_router.clone();
+    let ros2_observe_tool = Arc::new(Ros2Skill::new("ws://localhost:9090"));
+    let ros2_observe_contracts = contracts.clone();
+    let ros2_observe_tool_for_router = ros2_observe_tool.clone();
+    router.register("ros2_observe", move |req, tx| {
+        let contracts = ros2_observe_contracts.clone();
+        let skill = ros2_observe_tool_for_router.clone();
         async move {
             if let Err(err) = contracts.validate(&req) {
                 return err_response(req.id, err);
@@ -78,18 +81,41 @@ pub fn build_application_router(broadcast_tx: broadcast::Sender<Vec<u8>>) -> Rou
             }
         }
     });
-    tracing::info!("registered skill: ros2 (target: ws://localhost:9090)");
+    tracing::info!("registered skill: ros2_observe (target: ws://localhost:9090)");
 
-    let assistant_contracts = contracts.clone();
-    let assistant_ros2_skill = ros2_skill.clone();
-    router.register("assistant", move |req, tx| {
-        let contracts = assistant_contracts.clone();
-        let ros2_skill = assistant_ros2_skill.clone();
+    let visual_debug_contracts = contracts.clone();
+    let visual_debug_engine = projection_engine.clone();
+    router.register("visual_debug", move |req, _tx| {
+        let contracts = visual_debug_contracts.clone();
+        let engine = visual_debug_engine.clone();
         async move {
             if let Err(err) = contracts.validate(&req) {
                 return err_response(req.id, err);
             }
-            assistant::handle_assistant_skill(req, tx, contracts, ros2_skill).await
+            visual_debug::handle_visual_debug_skill(req, engine).await
+        }
+    });
+    tracing::info!("registered skill: visual_debug");
+
+    let assistant_contracts = contracts.clone();
+    let assistant_ros2_observe_tool = ros2_observe_tool.clone();
+    let assistant_projection_engine = projection_engine.clone();
+    router.register("assistant", move |req, tx| {
+        let contracts = assistant_contracts.clone();
+        let ros2_observe_tool = assistant_ros2_observe_tool.clone();
+        let projection_engine = assistant_projection_engine.clone();
+        async move {
+            if let Err(err) = contracts.validate(&req) {
+                return err_response(req.id, err);
+            }
+            assistant::handle_assistant_skill(
+                req,
+                tx,
+                contracts,
+                ros2_observe_tool,
+                projection_engine,
+            )
+            .await
         }
     });
     tracing::info!("registered skill: assistant");

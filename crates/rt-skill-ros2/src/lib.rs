@@ -20,7 +20,7 @@ impl Ros2Skill {
 #[async_trait]
 impl Skill for Ros2Skill {
     fn name(&self) -> &str {
-        "ros2"
+        "ros2_observe"
     }
 
     async fn execute(
@@ -159,17 +159,22 @@ async fn topic_stats(skill: &Ros2Skill, params: &Value) -> ExecutionResult {
 }
 
 async fn stream_endpoint(skill: &Ros2Skill, params: &Value) -> ExecutionResult {
-    let transport = params
+    let requested_transport = params
         .get("transport")
         .and_then(Value::as_str)
         .unwrap_or("foxglove")
         .to_lowercase();
+    let transport = match requested_transport.as_str() {
+        "rosbridge" => "rosbridge".to_string(),
+        _ => "foxglove".to_string(),
+    };
     let default_port = if transport == "rosbridge" { 9090 } else { 8765 };
     let port = read_u64_param(params, "port")
         .unwrap_or(default_port as u64)
         .clamp(1, 65535) as u16;
 
     let socket = format!("127.0.0.1:{}", port);
+    let bridge_url = format!("ws://localhost:{}", port);
     let status = match timeout(
         Duration::from_secs(2),
         tokio::net::TcpStream::connect(&socket),
@@ -186,12 +191,15 @@ async fn stream_endpoint(skill: &Ros2Skill, params: &Value) -> ExecutionResult {
         "status": status,
         "agent_local_endpoint": format!("ws://{}", socket),
         "cli_forward_endpoint": format!("ws://localhost:{}", port),
+        "required_process": if transport == "rosbridge" { "rosbridge_server" } else { "foxglove_bridge" },
         "notes": [
             "Use `robotunnel connect <robot>` to establish the data plane.",
             "CLI will auto-forward 9090 and 8765 by default.",
-            "For custom ports (including rviz web/VNC), use `robotunnel connect --forward <local>:<remote>`."
+            "For custom ports (including rviz web/VNC), use `robotunnel connect --forward <local>:<remote>`.",
+            "Status reflects whether agent can TCP-connect to 127.0.0.1:<port>; unreachable usually means bridge process is not listening on robot side."
         ],
-        "bridge_url": skill.bridge_url,
+        "bridge_url": bridge_url,
+        "default_rosbridge_url": skill.bridge_url,
     }))
 }
 

@@ -1,4 +1,5 @@
 use super::contracts::BuiltinContracts;
+use super::projection_plane::ProjectionEngine;
 use rt_agent_dispatch::Skill;
 use rt_core::protocol::{CommandRequest, CommandResponse, CommandStatus};
 use rt_llm::{InferRequest, LlmManager, Provider};
@@ -44,7 +45,8 @@ pub(super) async fn handle_assistant_skill(
     req: CommandRequest,
     tx: broadcast::Sender<Vec<u8>>,
     contracts: Arc<BuiltinContracts>,
-    ros2_skill: Arc<Ros2Skill>,
+    ros2_observe_tool: Arc<Ros2Skill>,
+    projection_engine: Arc<ProjectionEngine>,
 ) -> CommandResponse {
     if req.action != "route" {
         return error_response(req.id, format!("unknown assistant action: {}", req.action));
@@ -120,9 +122,15 @@ pub(super) async fn handle_assistant_skill(
             );
         }
 
-        let tool_resp =
-            execute_local_tool_call(&req.id, tool.clone(), tx, contracts.as_ref(), ros2_skill)
-                .await;
+        let tool_resp = execute_local_tool_call(
+            &req.id,
+            tool.clone(),
+            tx,
+            contracts.as_ref(),
+            ros2_observe_tool,
+            projection_engine,
+        )
+        .await;
         let reply = if decision.reply.trim().is_empty() {
             format_tool_reply(&tool, &tool_resp)
         } else {
@@ -149,7 +157,7 @@ pub(super) async fn handle_assistant_skill(
     }
 
     let reply = if decision.reply.trim().is_empty() {
-        "I need more details. Tell me which robot signal you want to inspect (status, logs, ros2 topics, monitor)."
+        "I need more details. Tell me which robot signal you want to inspect (status, logs, ros2 topics, visual projection, monitor)."
             .to_string()
     } else {
         decision.reply
@@ -235,24 +243,29 @@ fn assistant_system_prompt() -> &'static str {
 You run on the robot and can call local tools.
 
 Available tools:
-- debug.status {}
-- debug.logs {"unit"?:string,"lines"?:integer,"since"?:string}
-- debug.shell {"cmd":string,"timeout"?:integer} (risky)
+- host_debug.status {}
+- host_debug.logs {"unit"?:string,"lines"?:integer,"since"?:string}
+- host_debug.shell {"cmd":string,"timeout"?:integer} (risky)
 - monitor.status {}
 - monitor.snapshot {}
-- ros2.list_topics {}
-- ros2.topic_info {"topic":string}
-- ros2.subscribe {"topic":string,"samples"?:integer,"timeout_sec"?:integer}
-- ros2.topic_stats {"topic":string,"window_sec"?:integer}
-- ros2.stream_endpoint {"transport"?:string,"port"?:integer}
+- ros2_observe.list_topics {}
+- ros2_observe.topic_info {"topic":string}
+- ros2_observe.subscribe {"topic":string,"samples"?:integer,"timeout_sec"?:integer}
+- ros2_observe.topic_stats {"topic":string,"window_sec"?:integer}
+- ros2_observe.stream_endpoint {"transport"?:string,"port"?:integer}
+- visual_debug.list_profiles {}
+- visual_debug.start {"mode"?:string,"profile"?:string,"transport_policy"?:string,"topics"?:array,"desired_delay_ms"?:integer}
+- visual_debug.stop {"session_id":string}
+- visual_debug.status {"session_id"?:string}
+- visual_debug.topic_stats {"topic":string,"window_sec"?:integer}
 - system.config_get {"section":"monitor"}
 - system.config_set {"section":"monitor","settings":{...}} (risky)
 
 Rules:
 1) Output JSON only.
 2) Choose at most one tool call.
-3) Prefer monitor/debug/ros2 for robot diagnostics.
-4) For risky calls (debug.shell, system.config_set), set needs_confirmation=true.
+3) Prefer monitor/host_debug/ros2_observe/visual_debug for robot diagnostics.
+4) For risky calls (host_debug.shell, system.config_set), set needs_confirmation=true.
 5) If no tool is needed, use kind='respond' with a concise reply.
 
 Response schema:
@@ -307,7 +320,7 @@ fn heuristic_plan(query: &str) -> AssistantDecision {
             needs_confirmation: false,
             confirmation_reason: String::new(),
             tool: Some(ToolCallSpec {
-                skill: "debug".to_string(),
+                skill: "host_debug".to_string(),
                 action: "logs".to_string(),
                 params: json!({ "lines": 80 }),
             }),
@@ -317,11 +330,11 @@ fn heuristic_plan(query: &str) -> AssistantDecision {
         if let Some(cmd) = extract_backtick_block(query) {
             return AssistantDecision {
                 reply: "This requires approval before I run a shell command.".to_string(),
-                summary: "Run debug.shell".to_string(),
+                summary: "Run host_debug.shell".to_string(),
                 needs_confirmation: true,
                 confirmation_reason: "Shell execution can modify robot state.".to_string(),
                 tool: Some(ToolCallSpec {
-                    skill: "debug".to_string(),
+                    skill: "host_debug".to_string(),
                     action: "shell".to_string(),
                     params: json!({ "cmd": cmd }),
                 }),
@@ -337,6 +350,24 @@ fn heuristic_plan(query: &str) -> AssistantDecision {
             tool: None,
         };
     }
+    if lower.contains("rviz")
+        || lower.contains("foxglove")
+        || lower.contains("projection")
+        || lower.contains("visual debug")
+        || lower.contains("可视化")
+    {
+        return AssistantDecision {
+            reply: String::new(),
+            summary: "Start visual debug projection session".to_string(),
+            needs_confirmation: false,
+            confirmation_reason: String::new(),
+            tool: Some(ToolCallSpec {
+                skill: "visual_debug".to_string(),
+                action: "start".to_string(),
+                params: json!({"mode":"foxglove","transport_policy":"tcp_only","profile":"balanced"}),
+            }),
+        };
+    }
     if lower.contains("ros") || lower.contains("topic") || lower.contains("话题") {
         if let Some(topic) = extract_topic_name(query) {
             return AssistantDecision {
@@ -345,7 +376,7 @@ fn heuristic_plan(query: &str) -> AssistantDecision {
                 needs_confirmation: false,
                 confirmation_reason: String::new(),
                 tool: Some(ToolCallSpec {
-                    skill: "ros2".to_string(),
+                    skill: "ros2_observe".to_string(),
                     action: "topic_info".to_string(),
                     params: json!({ "topic": topic }),
                 }),
@@ -357,7 +388,7 @@ fn heuristic_plan(query: &str) -> AssistantDecision {
             needs_confirmation: false,
             confirmation_reason: String::new(),
             tool: Some(ToolCallSpec {
-                skill: "ros2".to_string(),
+                skill: "ros2_observe".to_string(),
                 action: "list_topics".to_string(),
                 params: json!({}),
             }),
@@ -385,11 +416,11 @@ fn heuristic_plan(query: &str) -> AssistantDecision {
 
     AssistantDecision {
         reply: String::new(),
-        summary: "Collect robot debug status".to_string(),
+        summary: "Collect robot host status".to_string(),
         needs_confirmation: false,
         confirmation_reason: String::new(),
         tool: Some(ToolCallSpec {
-            skill: "debug".to_string(),
+            skill: "host_debug".to_string(),
             action: "status".to_string(),
             params: json!({}),
         }),
@@ -401,7 +432,8 @@ async fn execute_local_tool_call(
     tool: ToolCallSpec,
     tx: broadcast::Sender<Vec<u8>>,
     contracts: &BuiltinContracts,
-    ros2_skill: Arc<Ros2Skill>,
+    ros2_observe_tool: Arc<Ros2Skill>,
+    projection_engine: Arc<ProjectionEngine>,
 ) -> CommandResponse {
     if tool.skill == "assistant" {
         return error_response(
@@ -421,16 +453,16 @@ async fn execute_local_tool_call(
     }
 
     match tool.skill.as_str() {
-        "debug" => rt_skill_debug::handle(sub_request, tx).await,
+        "host_debug" => rt_skill_debug::handle(sub_request, tx).await,
         "monitor" => super::handle_monitor_skill(sub_request).await,
         "fleet" => super::handle_fleet_skill(sub_request).await,
         "acceptance" => super::handle_acceptance_skill(sub_request).await,
         "system" => super::handle_system_skill(sub_request, contracts).await,
-        "ros2" => {
+        "ros2_observe" => {
             let action = sub_request.action.clone();
             let params = sub_request.params.clone();
             let id = sub_request.id.clone();
-            match ros2_skill.execute(&action, params, tx).await {
+            match ros2_observe_tool.execute(&action, params, tx).await {
                 Ok(data) => CommandResponse {
                     id,
                     status: CommandStatus::Ok,
@@ -445,6 +477,9 @@ async fn execute_local_tool_call(
                 },
             }
         }
+        "visual_debug" => {
+            super::visual_debug::handle_visual_debug_skill(sub_request, projection_engine).await
+        }
         _ => error_response(
             sub_request.id,
             format!("unsupported tool call: {}.{}", tool.skill, tool.action),
@@ -453,7 +488,7 @@ async fn execute_local_tool_call(
 }
 
 fn is_risky_call(tool: &ToolCallSpec) -> bool {
-    (tool.skill == "debug" && tool.action == "shell")
+    (tool.skill == "host_debug" && tool.action == "shell")
         || (tool.skill == "system" && tool.action == "config_set")
 }
 
@@ -504,7 +539,7 @@ fn format_tool_reply(tool: &ToolCallSpec, response: &CommandResponse) -> String 
                 cpu, mem, disk
             )
         }
-        ("debug", "status") => {
+        ("host_debug", "status") => {
             let hostname = string_field(data, "hostname").unwrap_or("unknown");
             let uptime = string_field(data, "uptime").unwrap_or("unknown");
             let mem = nested_number_field(data, &["memory", "used_percent"]).unwrap_or(0.0);
@@ -514,7 +549,7 @@ fn format_tool_reply(tool: &ToolCallSpec, response: &CommandResponse) -> String 
                 hostname, uptime, mem, disk
             )
         }
-        ("debug", "logs") => {
+        ("host_debug", "logs") => {
             let logs = string_field(data, "logs").unwrap_or("");
             let tail = tail_lines(logs, 12, 1000);
             if tail.is_empty() {
@@ -523,7 +558,7 @@ fn format_tool_reply(tool: &ToolCallSpec, response: &CommandResponse) -> String 
                 format!("Recent logs:\n{}", tail)
             }
         }
-        ("ros2", "list_topics") => {
+        ("ros2_observe", "list_topics") => {
             let topics = data
                 .get("topics")
                 .and_then(|v| v.as_array())
@@ -543,12 +578,12 @@ fn format_tool_reply(tool: &ToolCallSpec, response: &CommandResponse) -> String 
                 format!("ROS 2 topics ({}): {}", topics.len(), topics.join(", "))
             }
         }
-        ("ros2", "topic_info") => {
+        ("ros2_observe", "topic_info") => {
             let topic = string_field(data, "topic").unwrap_or("unknown");
             let topic_type = string_field(data, "type").unwrap_or("unknown");
             format!("ROS 2 topic `{}` type: `{}`.", topic, topic_type)
         }
-        ("ros2", "subscribe") => {
+        ("ros2_observe", "subscribe") => {
             let topic = string_field(data, "topic").unwrap_or("unknown");
             let collected = data
                 .get("samples_collected")
@@ -559,7 +594,7 @@ fn format_tool_reply(tool: &ToolCallSpec, response: &CommandResponse) -> String 
                 collected, topic
             )
         }
-        ("ros2", "topic_stats") => {
+        ("ros2_observe", "topic_stats") => {
             let topic = string_field(data, "topic").unwrap_or("unknown");
             let hz = number_field(data, "average_hz").unwrap_or(0.0);
             let delay = number_field(data, "average_delay_sec").unwrap_or(0.0);
@@ -569,7 +604,7 @@ fn format_tool_reply(tool: &ToolCallSpec, response: &CommandResponse) -> String 
                 topic, hz, delay, bw
             )
         }
-        ("ros2", "stream_endpoint") => {
+        ("ros2_observe", "stream_endpoint") => {
             let endpoint =
                 string_field(data, "cli_forward_endpoint").unwrap_or("ws://localhost:8765");
             let transport = string_field(data, "transport").unwrap_or("foxglove");
@@ -578,6 +613,20 @@ fn format_tool_reply(tool: &ToolCallSpec, response: &CommandResponse) -> String 
                 "ROS stream endpoint ({}) is {} at {}.",
                 transport, status, endpoint
             )
+        }
+        ("visual_debug", "start") => {
+            let session_id =
+                nested_string_field(data, &["session", "session_id"]).unwrap_or("unknown");
+            let mode = nested_string_field(data, &["session", "mode"]).unwrap_or("unknown");
+            let profile = nested_string_field(data, &["session", "profile"]).unwrap_or("unknown");
+            format!(
+                "Visual debug projection started: session `{}`, mode `{}`, profile `{}`.",
+                session_id, mode, profile
+            )
+        }
+        ("visual_debug", "status") => {
+            let count = data.get("count").and_then(Value::as_u64).unwrap_or(0);
+            format!("Visual debug has {} active projection session(s).", count)
         }
         _ => serde_json::to_string_pretty(data).unwrap_or_else(|_| "{}".to_string()),
     }
@@ -668,6 +717,14 @@ fn number_field(data: &Value, key: &str) -> Option<f64> {
     data.get(key).and_then(Value::as_f64)
 }
 
+fn nested_string_field<'a>(data: &'a Value, path: &[&str]) -> Option<&'a str> {
+    let mut current = data;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_str()
+}
+
 fn nested_number_field(data: &Value, path: &[&str]) -> Option<f64> {
     let mut current = data;
     for key in path {
@@ -714,7 +771,7 @@ mod tests {
         let decision = heuristic_plan("请执行 `ros2 node list`");
         assert!(decision.needs_confirmation);
         let tool = decision.tool.expect("tool");
-        assert_eq!(tool.skill, "debug");
+        assert_eq!(tool.skill, "host_debug");
         assert_eq!(tool.action, "shell");
     }
 }

@@ -57,7 +57,8 @@ pub fn start_webrtc_bridge_if_enabled(
 
     Some(tokio::spawn(async move {
         let mut resolved_robot_id = configured_robot_id.clone();
-        loop {
+        let mut pending_trigger: Option<rt_core::protocol::WebRtcBootstrapPayload> = None;
+        'bridge: loop {
             if *shutdown_rx.borrow() {
                 break;
             }
@@ -67,13 +68,23 @@ pub fn start_webrtc_bridge_if_enabled(
                     resolve_robot_id_from_platform(&platform_api_url, &api_key).await;
             }
 
-            // On-demand: wait for trigger from platform over TCP tunnel
-            let payload = tokio::select! {
-                Some(p) = webrtc_trigger_rx.recv() => {
-                    tracing::info!("[BOOTSTRAP:{}] webrtc: received trigger signal, starting bootstrap", p.bootstrap_id);
-                    p
+            // On-demand: wait for trigger from platform over TCP tunnel.
+            // If a newer trigger arrives while a session is active, it is stashed
+            // into pending_trigger and consumed here first to avoid queue buildup.
+            let payload = if let Some(p) = pending_trigger.take() {
+                tracing::info!(
+                    "[BOOTSTRAP:{}] webrtc: processing queued trigger",
+                    p.bootstrap_id
+                );
+                p
+            } else {
+                tokio::select! {
+                    Some(p) = webrtc_trigger_rx.recv() => {
+                        tracing::info!("[BOOTSTRAP:{}] webrtc: received trigger signal, starting bootstrap", p.bootstrap_id);
+                        p
+                    }
+                    _ = shutdown_rx.changed() => { break 'bridge; }
                 }
-                _ = shutdown_rx.changed() => { break; }
             };
 
             let bootstrap_id = payload.bootstrap_id.clone();
@@ -96,7 +107,7 @@ pub fn start_webrtc_bridge_if_enabled(
                     );
                     tokio::select! {
                         _ = sleep(Duration::from_secs(20)) => {}
-                        _ = shutdown_rx.changed() => { break; }
+                        _ = shutdown_rx.changed() => { break 'bridge; }
                     }
                     continue;
                 }
@@ -153,10 +164,29 @@ pub fn start_webrtc_bridge_if_enabled(
                         });
 
                         let mut is_teardown = false;
+                        let mut superseded_by_new_trigger = false;
                         loop {
                             tokio::select! {
                                 Some(p) = dc_payload_rx.recv() => {
                                     handle_webrtc_payload(p, &command_tx, &dc, relay_ctx.clone()).await;
+                                }
+                                Some(next_trigger) = webrtc_trigger_rx.recv() => {
+                                    let next_id = next_trigger.bootstrap_id.clone();
+                                    if next_id == bootstrap_id {
+                                        tracing::debug!(
+                                            "[BOOTSTRAP:{}] webrtc: duplicate trigger received while active; ignoring",
+                                            bootstrap_id
+                                        );
+                                        continue;
+                                    }
+                                    tracing::info!(
+                                        "[BOOTSTRAP:{}] webrtc: superseded by newer trigger {}; restarting",
+                                        bootstrap_id,
+                                        next_id
+                                    );
+                                    pending_trigger = Some(next_trigger);
+                                    superseded_by_new_trigger = true;
+                                    break;
                                 }
                                 Some(_) = dc_closed_rx.recv() => {
                                     tracing::warn!("[BOOTSTRAP:{}] webrtc datachannel closed", bootstrap_id);
@@ -181,7 +211,7 @@ pub fn start_webrtc_bridge_if_enabled(
                         relay_ctx.shutdown().await;
                         relay_send_task.abort();
 
-                        if *shutdown_rx.borrow() || is_teardown {
+                        if *shutdown_rx.borrow() || is_teardown || superseded_by_new_trigger {
                             break; // Exit connection loop
                         }
 

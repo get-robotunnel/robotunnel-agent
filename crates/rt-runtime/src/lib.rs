@@ -24,7 +24,7 @@ pub type ExecutionResult = Result<Value, SkillError>;
 
 #[async_trait]
 pub trait Skill: Send + Sync {
-    /// Name of the skill (e.g., "debug", "ros2").
+    /// Name of the skill (e.g., "host_debug", "ros2_observe").
     fn name(&self) -> &str;
 
     /// Execute an action within this skill.
