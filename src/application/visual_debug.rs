@@ -1,6 +1,8 @@
 use super::projection_plane::engine::{resolve_profile, ProjectionEngine, ProjectionFilters};
+use super::projection_plane::policy::{profile_topic_policy_overrides, TopicPolicySet};
 use super::projection_plane::stats::collect_topic_stats;
 use super::projection_plane::{ProjectionMode, SessionStartRequest};
+use super::visual_debug_config::VisualDebugSettings;
 use rt_core::protocol::{CommandRequest, CommandResponse, CommandStatus};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -14,7 +16,8 @@ pub(super) async fn handle_visual_debug_skill(
         "start" => handle_start(req, engine).await,
         "stop" => handle_stop(req, engine).await,
         "status" => handle_status(req, engine).await,
-        "topic_stats" => handle_topic_stats(req).await,
+        "topic_stats" => handle_topic_stats(req, engine).await,
+        "stream_pull" => handle_stream_pull(req, engine).await,
         other => err(req.id, format!("unknown visual_debug action: {}", other)),
     }
 }
@@ -31,7 +34,7 @@ async fn handle_start(req: CommandRequest, engine: Arc<ProjectionEngine>) -> Com
         .params
         .get("transport_policy")
         .and_then(Value::as_str)
-        .unwrap_or("tcp_only")
+        .unwrap_or("auto")
         .trim()
         .to_string();
 
@@ -80,6 +83,10 @@ async fn handle_start(req: CommandRequest, engine: Arc<ProjectionEngine>) -> Com
         .map(ToString::to_string);
 
     let vnc_port = read_u16_param(&req.params, "vnc_port");
+    let topic_policy = match resolve_topic_policy(&req.params, &resolved_profile) {
+        Ok(policy) => policy,
+        Err(message) => return err(req.id, message),
+    };
 
     let session = engine
         .start_session(SessionStartRequest {
@@ -90,6 +97,7 @@ async fn handle_start(req: CommandRequest, engine: Arc<ProjectionEngine>) -> Com
             topics,
             desired_delay_ms,
             filters,
+            topic_policy,
             vnc_port,
         })
         .await;
@@ -101,6 +109,23 @@ async fn handle_start(req: CommandRequest, engine: Arc<ProjectionEngine>) -> Com
             "session": session,
         }),
     )
+}
+
+fn resolve_topic_policy(params: &Value, resolved_profile: &str) -> Result<TopicPolicySet, String> {
+    let mut base = match VisualDebugSettings::load() {
+        Ok(cfg) => cfg.topic_policy_set(),
+        Err(_) => TopicPolicySet::builtin_defaults(),
+    };
+
+    if let Some(profile_overrides) = profile_topic_policy_overrides(resolved_profile) {
+        base = base.merged_with(&profile_overrides);
+    }
+
+    if let Some(raw_overrides) = params.get("topic_policy") {
+        let overrides = TopicPolicySet::from_params(raw_overrides)?;
+        base = base.merged_with(&overrides);
+    }
+    Ok(base)
 }
 
 async fn handle_stop(req: CommandRequest, engine: Arc<ProjectionEngine>) -> CommandResponse {
@@ -130,7 +155,7 @@ async fn handle_status(req: CommandRequest, engine: Arc<ProjectionEngine>) -> Co
     ok(req.id, status)
 }
 
-async fn handle_topic_stats(req: CommandRequest) -> CommandResponse {
+async fn handle_topic_stats(req: CommandRequest, engine: Arc<ProjectionEngine>) -> CommandResponse {
     let Some(topic) = req.params.get("topic").and_then(Value::as_str) else {
         return err(req.id, "missing required param: topic".to_string());
     };
@@ -139,17 +164,76 @@ async fn handle_topic_stats(req: CommandRequest) -> CommandResponse {
         .get("window_sec")
         .and_then(Value::as_u64)
         .unwrap_or(6);
+    let session_id = req
+        .params
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
+    let runtime_stats = engine.topic_runtime_stats(topic, session_id).await;
+    let runtime_payload = runtime_stats.as_ref().map(|stats| {
+        json!({
+            "source": "projection_runtime_sampler",
+            "stats": stats,
+        })
+    });
 
     match collect_topic_stats(topic, window_sec).await {
         Ok(stats) => ok(
             req.id,
             json!({
                 "source": "projection_stats_collector",
+                "runtime_projection": runtime_payload,
                 "stats": stats,
             }),
         ),
-        Err(msg) => err(req.id, msg),
+        Err(msg) => {
+            if let Some(runtime_projection) = runtime_payload {
+                return ok(
+                    req.id,
+                    json!({
+                        "source": "projection_runtime_sampler",
+                        "collector_error": msg,
+                        "runtime_projection": runtime_projection,
+                    }),
+                );
+            }
+            err(req.id, msg)
+        }
     }
+}
+
+async fn handle_stream_pull(req: CommandRequest, engine: Arc<ProjectionEngine>) -> CommandResponse {
+    let Some(session_id) = req.params.get("session_id").and_then(Value::as_str) else {
+        return err(req.id, "missing required param: session_id".to_string());
+    };
+    let Some(topic) = req.params.get("topic").and_then(Value::as_str) else {
+        return err(req.id, "missing required param: topic".to_string());
+    };
+
+    let since_seq = req.params.get("since_seq").and_then(Value::as_u64);
+    let limit = req
+        .params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(8)
+        .clamp(1, 64) as usize;
+
+    let Some(payload) = engine
+        .stream_pull(session_id.trim(), topic.trim(), since_seq, limit)
+        .await
+    else {
+        return err(req.id, "session/topic buffer not found".to_string());
+    };
+
+    ok(
+        req.id,
+        json!({
+            "source": "projection_stream_buffer",
+            "stream": payload,
+        }),
+    )
 }
 
 fn read_u32_param(params: &Value, key: &str) -> Option<u32> {

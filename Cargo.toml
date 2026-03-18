@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rt-core", "crates/rt-runtime", "crates/rt-skill-debug", "crates/rt-skill-ros2", "crates/rt-llm", "crates/rt-webrtc", "crates/rt-skill-monitor", "crates/rt-skill-fleet", "crates/rt-skill-acceptance"]
+members = ["crates/rt-core", "crates/rt-runtime", "crates/rt-skill-host-debug", "crates/rt-skill-ros2-observe", "crates/rt-llm", "crates/rt-webrtc", "crates/rt-skill-monitor", "crates/rt-skill-fleet", "crates/rt-skill-acceptance"]
 resolver = "2"
 
 [package]
@@ -16,8 +16,8 @@ path = "src/main.rs"
 [dependencies]
 rt-core = { path = "crates/rt-core" }
 rt-agent-dispatch = { path = "crates/rt-runtime" }
-rt-skill-debug = { path = "crates/rt-skill-debug" }
-rt-skill-ros2 = { path = "crates/rt-skill-ros2" }
+rt-skill-host-debug = { path = "crates/rt-skill-host-debug" }
+rt-skill-ros2-observe = { path = "crates/rt-skill-ros2-observe" }
 rt-skill-monitor = { path = "crates/rt-skill-monitor" }
 rt-skill-fleet = { path = "crates/rt-skill-fleet" }
 rt-skill-acceptance = { path = "crates/rt-skill-acceptance" }

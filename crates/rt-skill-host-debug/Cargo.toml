@@ -1,5 +1,5 @@
 [package]
-name = "rt-skill-debug"
+name = "rt-skill-host-debug"
 version = "0.2.0"
 edition = "2021"
 license = "MIT"

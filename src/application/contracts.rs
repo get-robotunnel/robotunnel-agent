@@ -110,7 +110,7 @@ impl BuiltinContracts {
                             "section",
                             ParamType::String,
                             true,
-                            "Config section name, for example 'monitor'.",
+                            "Config section name, for example 'monitor' or 'visual_debug'.",
                         )],
                     },
                     ActionContract {
@@ -121,7 +121,7 @@ impl BuiltinContracts {
                                 "section",
                                 ParamType::String,
                                 true,
-                                "Config section name, for example 'monitor'.",
+                                "Config section name, for example 'monitor' or 'visual_debug'.",
                             ),
                             param(
                                 "settings",
@@ -317,6 +317,12 @@ impl BuiltinContracts {
                                 "Optional output rate limit.",
                             ),
                             param(
+                                "topic_policy",
+                                ParamType::Object,
+                                false,
+                                "Optional per-session topic policy overrides keyed by topic/type/*.",
+                            ),
+                            param(
                                 "vnc_port",
                                 ParamType::Integer,
                                 false,
@@ -357,10 +363,42 @@ impl BuiltinContracts {
                         params: vec![
                             param("topic", ParamType::String, true, "ROS 2 topic name."),
                             param(
+                                "session_id",
+                                ParamType::String,
+                                false,
+                                "Optional projection session identifier to scope runtime stats.",
+                            ),
+                            param(
                                 "window_sec",
                                 ParamType::Integer,
                                 false,
                                 "Sampling window in seconds.",
+                            ),
+                        ],
+                    },
+                    ActionContract {
+                        name: "stream_pull",
+                        description:
+                            "Pull projected stream messages from session-local topic buffer for sustained forwarding.",
+                        params: vec![
+                            param(
+                                "session_id",
+                                ParamType::String,
+                                true,
+                                "Projection session identifier.",
+                            ),
+                            param("topic", ParamType::String, true, "ROS 2 topic name."),
+                            param(
+                                "since_seq",
+                                ParamType::Integer,
+                                false,
+                                "Return messages with sequence number greater than this value.",
+                            ),
+                            param(
+                                "limit",
+                                ParamType::Integer,
+                                false,
+                                "Maximum number of messages to return (default 8).",
                             ),
                         ],
                     },

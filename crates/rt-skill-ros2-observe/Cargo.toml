@@ -1,5 +1,5 @@
 [package]
-name = "rt-skill-ros2"
+name = "rt-skill-ros2-observe"
 version = "0.2.0"
 edition = "2021"
 license = "MIT"

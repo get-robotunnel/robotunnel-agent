@@ -3,7 +3,7 @@ use super::projection_plane::ProjectionEngine;
 use rt_agent_dispatch::Skill;
 use rt_core::protocol::{CommandRequest, CommandResponse, CommandStatus};
 use rt_llm::{InferRequest, LlmManager, Provider};
-use rt_skill_ros2::Ros2Skill;
+use rt_skill_ros2_observe::Ros2Skill;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -254,12 +254,13 @@ Available tools:
 - ros2_observe.topic_stats {"topic":string,"window_sec"?:integer}
 - ros2_observe.stream_endpoint {"transport"?:string,"port"?:integer}
 - visual_debug.list_profiles {}
-- visual_debug.start {"mode"?:string,"profile"?:string,"transport_policy"?:string,"topics"?:array,"desired_delay_ms"?:integer}
+- visual_debug.start {"mode"?:string,"profile"?:string,"transport_policy"?:string,"topics"?:array,"desired_delay_ms"?:integer,"topic_policy"?:object}
 - visual_debug.stop {"session_id":string}
 - visual_debug.status {"session_id"?:string}
-- visual_debug.topic_stats {"topic":string,"window_sec"?:integer}
-- system.config_get {"section":"monitor"}
-- system.config_set {"section":"monitor","settings":{...}} (risky)
+- visual_debug.topic_stats {"topic":string,"session_id"?:string,"window_sec"?:integer}
+- visual_debug.stream_pull {"session_id":string,"topic":string,"since_seq"?:integer,"limit"?:integer}
+- system.config_get {"section":"monitor|visual_debug"}
+- system.config_set {"section":"monitor|visual_debug","settings":{...}} (risky)
 
 Rules:
 1) Output JSON only.
@@ -453,7 +454,7 @@ async fn execute_local_tool_call(
     }
 
     match tool.skill.as_str() {
-        "host_debug" => rt_skill_debug::handle(sub_request, tx).await,
+        "host_debug" => rt_skill_host_debug::handle(sub_request, tx).await,
         "monitor" => super::handle_monitor_skill(sub_request).await,
         "fleet" => super::handle_fleet_skill(sub_request).await,
         "acceptance" => super::handle_acceptance_skill(sub_request).await,
@@ -628,6 +629,25 @@ fn format_tool_reply(tool: &ToolCallSpec, response: &CommandResponse) -> String 
             let count = data.get("count").and_then(Value::as_u64).unwrap_or(0);
             format!("Visual debug has {} active projection session(s).", count)
         }
+        ("visual_debug", "topic_stats") => {
+            let topic = nested_string_field(data, &["stats", "topic"]).unwrap_or("unknown");
+            let hz = nested_number_field(data, &["stats", "average_hz"]).unwrap_or(0.0);
+            let runtime_captures =
+                nested_u64_field(data, &["runtime_projection", "stats", "captures"]).unwrap_or(0);
+            format!(
+                "Visual debug topic stats for `{}`: {:.2} Hz (runtime captures {}).",
+                topic, hz, runtime_captures
+            )
+        }
+        ("visual_debug", "stream_pull") => {
+            let topic = nested_string_field(data, &["stream", "topic"]).unwrap_or("unknown");
+            let returned = nested_u64_field(data, &["stream", "returned"]).unwrap_or(0);
+            let last_seq = nested_u64_field(data, &["stream", "last_seq"]).unwrap_or(0);
+            format!(
+                "Pulled {} projected message(s) for `{}` (last_seq={}).",
+                returned, topic, last_seq
+            )
+        }
         _ => serde_json::to_string_pretty(data).unwrap_or_else(|_| "{}".to_string()),
     }
 }
@@ -731,6 +751,14 @@ fn nested_number_field(data: &Value, path: &[&str]) -> Option<f64> {
         current = current.get(*key)?;
     }
     current.as_f64()
+}
+
+fn nested_u64_field(data: &Value, path: &[&str]) -> Option<u64> {
+    let mut current = data;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_u64()
 }
 
 fn ok_response(id: String, data: Value) -> CommandResponse {

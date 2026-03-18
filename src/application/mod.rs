@@ -10,9 +10,11 @@ mod contracts;
 mod monitor_config;
 mod projection_plane;
 mod visual_debug;
+mod visual_debug_config;
 
 use self::contracts::BuiltinContracts;
 pub use self::monitor_config::MonitorSettings;
+use self::visual_debug_config::VisualDebugSettings;
 use rt_agent_dispatch::router::Router;
 use rt_agent_dispatch::Skill;
 use rt_core::protocol::{CommandRequest, CommandResponse, CommandStatus};
@@ -21,7 +23,7 @@ use rt_llm::Provider;
 use rt_skill_acceptance::{AcceptanceReport, RobotObservation};
 use rt_skill_fleet::{FleetCompareReport, RobotTelemetry};
 use rt_skill_monitor::{MetricSnapshot, MonitorConfig, MonitorService};
-use rt_skill_ros2::Ros2Skill;
+use rt_skill_ros2_observe::Ros2Skill;
 use std::fs;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -47,7 +49,7 @@ pub fn build_application_router(broadcast_tx: broadcast::Sender<Vec<u8>>) -> Rou
             if let Err(err) = contracts.validate(&req) {
                 return err_response(req.id, err);
             }
-            rt_skill_debug::handle(req, tx).await
+            rt_skill_host_debug::handle(req, tx).await
         }
     });
     tracing::info!("registered skill: host_debug");
@@ -341,6 +343,22 @@ fn handle_system_config_get(req: CommandRequest) -> CommandResponse {
             },
             Err(err) => err_response(req.id, format!("load monitor config failed: {}", err)),
         },
+        "visual_debug" => match VisualDebugSettings::load() {
+            Ok(settings) => match serde_json::to_value(settings) {
+                Ok(data) => ok_response(
+                    req.id,
+                    serde_json::json!({
+                        "section": "visual_debug",
+                        "settings": data,
+                    }),
+                ),
+                Err(err) => err_response(
+                    req.id,
+                    format!("serialize visual_debug config failed: {}", err),
+                ),
+            },
+            Err(err) => err_response(req.id, format!("load visual_debug config failed: {}", err)),
+        },
         other => err_response(req.id, format!("unknown config section: {}", other)),
     }
 }
@@ -386,6 +404,36 @@ fn handle_system_config_set(req: CommandRequest) -> CommandResponse {
                 Err(err) => {
                     err_response(req.id, format!("serialize monitor config failed: {}", err))
                 }
+            }
+        }
+        "visual_debug" => {
+            let mut current = match VisualDebugSettings::load() {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    return err_response(
+                        req.id,
+                        format!("load visual_debug config failed: {}", err),
+                    )
+                }
+            };
+            if let Err(err) = current.apply_structured_settings(settings) {
+                return err_response(req.id, format!("invalid visual_debug config: {}", err));
+            }
+            if let Err(err) = current.save() {
+                return err_response(req.id, format!("save visual_debug config failed: {}", err));
+            }
+            match serde_json::to_value(&current) {
+                Ok(data) => ok_response(
+                    req.id,
+                    serde_json::json!({
+                        "section": "visual_debug",
+                        "settings": data,
+                    }),
+                ),
+                Err(err) => err_response(
+                    req.id,
+                    format!("serialize visual_debug config failed: {}", err),
+                ),
             }
         }
         other => err_response(req.id, format!("unknown config section: {}", other)),

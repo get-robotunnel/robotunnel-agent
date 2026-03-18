@@ -63,5 +63,29 @@ pub fn builtin_profiles() -> Vec<ProjectionProfile> {
                 desired_delay_ms: 200,
             },
         },
+        ProjectionProfile {
+            name: "compressed_passthrough",
+            summary:
+                "Compressed-image pass-through with frame-rate cap for low-bandwidth camera debug.",
+            defaults: ProjectionDefaults {
+                point_stride: None,
+                voxel_leaf_m: None,
+                image_scale: None,
+                hz_limit: Some(8.0),
+                desired_delay_ms: 120,
+            },
+        },
+        ProjectionProfile {
+            name: "compressed_resize",
+            summary:
+                "Compressed-image resize + JPEG re-encode profile for constrained uplink sessions.",
+            defaults: ProjectionDefaults {
+                point_stride: None,
+                voxel_leaf_m: None,
+                image_scale: None,
+                hz_limit: Some(6.0),
+                desired_delay_ms: 150,
+            },
+        },
     ]
 }

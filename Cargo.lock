@@ -1818,10 +1818,10 @@ dependencies = [
  "rt-core",
  "rt-llm",
  "rt-skill-acceptance",
- "rt-skill-debug",
  "rt-skill-fleet",
+ "rt-skill-host-debug",
  "rt-skill-monitor",
- "rt-skill-ros2",
+ "rt-skill-ros2-observe",
  "rt-webrtc",
  "serde",
  "serde_json",
@@ -1897,19 +1897,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rt-skill-debug"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "rt-agent-dispatch",
- "rt-core",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "rt-skill-fleet"
 version = "0.3.0"
 dependencies = [
@@ -1917,6 +1904,19 @@ dependencies = [
  "reqwest",
  "rt-core",
  "rt-llm",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rt-skill-host-debug"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "rt-agent-dispatch",
+ "rt-core",
  "serde",
  "serde_json",
  "tokio",
@@ -1939,7 +1939,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rt-skill-ros2"
+name = "rt-skill-ros2-observe"
 version = "0.2.0"
 dependencies = [
  "async-trait",

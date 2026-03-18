@@ -1,0 +1,356 @@
+use super::engine::ProjectionFilters;
+use serde::{Deserialize, Serialize};
+use tokio::process::Command;
+use tokio::time::{timeout, Duration};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TopicProjectionStats {
+    pub topic: String,
+    pub status: String,
+    pub topic_type: Option<String>,
+    pub captures: u64,
+    pub failures: u64,
+    pub last_capture_unix: Option<u64>,
+    pub last_error: Option<String>,
+    pub input_bytes: Option<u64>,
+    pub output_bytes: Option<u64>,
+    pub input_points: Option<u64>,
+    pub output_points: Option<u64>,
+    pub input_width_px: Option<u32>,
+    pub input_height_px: Option<u32>,
+    pub output_width_px: Option<u32>,
+    pub output_height_px: Option<u32>,
+    pub applied_filters: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProjectionRuntimeState {
+    pub data_plane_enabled: bool,
+    pub worker_state: String,
+    pub total_captures: u64,
+    pub total_failures: u64,
+    pub last_tick_unix: Option<u64>,
+    pub topic_stats: Vec<TopicProjectionStats>,
+}
+
+impl ProjectionRuntimeState {
+    pub fn new(topics: &[String]) -> Self {
+        let mut topic_stats = Vec::with_capacity(topics.len());
+        for topic in topics {
+            topic_stats.push(TopicProjectionStats {
+                topic: topic.clone(),
+                status: "pending".to_string(),
+                ..Default::default()
+            });
+        }
+        Self {
+            data_plane_enabled: !topics.is_empty(),
+            worker_state: if topics.is_empty() {
+                "idle".to_string()
+            } else {
+                "starting".to_string()
+            },
+            total_captures: 0,
+            total_failures: 0,
+            last_tick_unix: None,
+            topic_stats,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TopicProjectionSample {
+    pub topic_type: Option<String>,
+    pub input_bytes: u64,
+    pub output_bytes: u64,
+    pub input_points: Option<u64>,
+    pub output_points: Option<u64>,
+    pub input_width_px: Option<u32>,
+    pub input_height_px: Option<u32>,
+    pub output_width_px: Option<u32>,
+    pub output_height_px: Option<u32>,
+    pub applied_filters: Vec<String>,
+    pub input_preview: Option<String>,
+    pub output_preview: Option<String>,
+}
+
+pub async fn sample_topic_projection(
+    topic: &str,
+    filters: &ProjectionFilters,
+) -> Result<TopicProjectionSample, String> {
+    let topic = topic.trim();
+    if topic.is_empty() {
+        return Err("empty topic".to_string());
+    }
+
+    let topic_type = read_topic_type(topic).await.ok();
+    let sample = run_ros2_cmd(&["topic", "echo", topic, "--once"], 8).await?;
+    let raw_bytes = sample.len() as u64;
+
+    if let Some(tt) = topic_type.as_deref() {
+        if tt.contains("sensor_msgs/msg/Image") {
+            return Ok(project_image_sample(
+                &sample, raw_bytes, filters, topic_type,
+            ));
+        }
+        if tt.contains("sensor_msgs/msg/PointCloud2") {
+            return Ok(project_point_cloud_sample(
+                &sample, raw_bytes, filters, topic_type,
+            ));
+        }
+    }
+
+    Ok(TopicProjectionSample {
+        topic_type,
+        input_bytes: raw_bytes,
+        output_bytes: raw_bytes,
+        input_points: None,
+        output_points: None,
+        input_width_px: None,
+        input_height_px: None,
+        output_width_px: None,
+        output_height_px: None,
+        applied_filters: Vec::new(),
+        input_preview: preview_text(&sample, 220),
+        output_preview: preview_text(&sample, 220),
+    })
+}
+
+fn project_image_sample(
+    sample: &str,
+    input_bytes: u64,
+    filters: &ProjectionFilters,
+    topic_type: Option<String>,
+) -> TopicProjectionSample {
+    let width = parse_u64_line(sample, "width:")
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| *v > 0);
+    let height = parse_u64_line(sample, "height:")
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| *v > 0);
+
+    let scale = filters.image_scale.unwrap_or(1.0).clamp(0.05, 1.0);
+    let mut applied_filters = Vec::new();
+    if scale < 0.999 {
+        applied_filters.push(format!("image_scale={:.3}", scale));
+    }
+
+    let (output_width, output_height) = match (width, height) {
+        (Some(w), Some(h)) => {
+            let ow = ((w as f64) * scale).round().max(1.0) as u32;
+            let oh = ((h as f64) * scale).round().max(1.0) as u32;
+            (Some(ow), Some(oh))
+        }
+        _ => (None, None),
+    };
+
+    let output_bytes = ((input_bytes as f64) * scale * scale).round() as u64;
+
+    TopicProjectionSample {
+        topic_type,
+        input_bytes,
+        output_bytes,
+        input_points: None,
+        output_points: None,
+        input_width_px: width,
+        input_height_px: height,
+        output_width_px: output_width,
+        output_height_px: output_height,
+        applied_filters,
+        input_preview: preview_text(sample, 220),
+        output_preview: Some(format!(
+            "scaled_image {}x{} -> {}x{} (scale={:.3})",
+            width.unwrap_or(0),
+            height.unwrap_or(0),
+            output_width.unwrap_or(0),
+            output_height.unwrap_or(0),
+            scale
+        )),
+    }
+}
+
+fn project_point_cloud_sample(
+    sample: &str,
+    input_bytes: u64,
+    filters: &ProjectionFilters,
+    topic_type: Option<String>,
+) -> TopicProjectionSample {
+    let width = parse_u64_line(sample, "width:");
+    let height = parse_u64_line(sample, "height:").unwrap_or(1).max(1);
+    let point_step = parse_u64_line(sample, "point_step:");
+    let row_step = parse_u64_line(sample, "row_step:");
+
+    let input_points =
+        width
+            .map(|w| w.saturating_mul(height))
+            .or_else(|| match (point_step, row_step) {
+                (Some(ps), Some(rs)) if ps > 0 => Some((rs / ps).saturating_mul(height)),
+                _ => None,
+            });
+
+    let stride = filters.point_stride.unwrap_or(1).max(1) as u64;
+    let output_points = input_points.map(|points| ceil_div(points, stride));
+
+    let mut applied_filters = Vec::new();
+    if stride > 1 {
+        applied_filters.push(format!("point_stride={}", stride));
+    }
+    if let Some(voxel) = filters.voxel_leaf_m {
+        if voxel > 0.0 {
+            applied_filters.push(format!("voxel_leaf_m={:.3}", voxel));
+        }
+    }
+
+    let output_bytes = if stride > 1 {
+        ceil_div(input_bytes, stride)
+    } else {
+        input_bytes
+    };
+
+    TopicProjectionSample {
+        topic_type,
+        input_bytes,
+        output_bytes,
+        input_points,
+        output_points,
+        input_width_px: None,
+        input_height_px: None,
+        output_width_px: None,
+        output_height_px: None,
+        applied_filters,
+        input_preview: preview_text(sample, 220),
+        output_preview: Some(format!(
+            "point_cloud points={} -> {} stride={} voxel_leaf_m={}",
+            input_points.unwrap_or(0),
+            output_points.unwrap_or(0),
+            stride,
+            filters
+                .voxel_leaf_m
+                .map(|v| format!("{:.3}", v))
+                .unwrap_or_else(|| "n/a".to_string())
+        )),
+    }
+}
+
+async fn read_topic_type(topic: &str) -> Result<String, String> {
+    let raw = run_ros2_cmd(&["topic", "type", topic], 4).await?;
+    let v = raw.trim().to_string();
+    if v.is_empty() {
+        return Err("empty topic type".to_string());
+    }
+    Ok(v)
+}
+
+async fn run_ros2_cmd(args: &[&str], timeout_sec: u64) -> Result<String, String> {
+    let mut cmd = Command::new("ros2");
+    cmd.args(args);
+
+    let duration = Duration::from_secs(timeout_sec.clamp(2, 30));
+    let output = timeout(duration, cmd.output())
+        .await
+        .map_err(|_| format!("timeout after {}s", duration.as_secs()))?
+        .map_err(|err| err.to_string())?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = stderr.trim();
+        if msg.is_empty() {
+            return Err(format!("ros2 {:?} exited with {}", args, output.status));
+        }
+        return Err(msg.to_string());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn parse_u64_line(raw: &str, key: &str) -> Option<u64> {
+    raw.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let rest = trimmed.strip_prefix(key)?.trim();
+        let token = rest
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(',');
+        token.parse::<u64>().ok()
+    })
+}
+
+fn ceil_div(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return a;
+    }
+    (a + b - 1) / b
+}
+
+fn preview_text(raw: &str, max_chars: usize) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = trimmed
+        .lines()
+        .take(24)
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let max_chars = max_chars.max(20);
+    if normalized.chars().count() <= max_chars {
+        return Some(normalized);
+    }
+    let mut out = String::new();
+    for ch in normalized.chars().take(max_chars) {
+        out.push(ch);
+    }
+    out.push_str("...");
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_u64_line_extracts_values() {
+        let raw = "width: 640\nheight: 480\npoint_step: 16\n";
+        assert_eq!(parse_u64_line(raw, "width:"), Some(640));
+        assert_eq!(parse_u64_line(raw, "height:"), Some(480));
+        assert_eq!(parse_u64_line(raw, "point_step:"), Some(16));
+    }
+
+    #[test]
+    fn image_projection_applies_scale() {
+        let filters = ProjectionFilters {
+            image_scale: Some(0.5),
+            ..ProjectionFilters::default()
+        };
+        let raw = "height: 720\nwidth: 1280\nencoding: rgb8\n";
+        let sample = project_image_sample(
+            raw,
+            1000,
+            &filters,
+            Some("sensor_msgs/msg/Image".to_string()),
+        );
+        assert_eq!(sample.input_width_px, Some(1280));
+        assert_eq!(sample.output_width_px, Some(640));
+        assert!(sample.output_bytes < sample.input_bytes);
+    }
+
+    #[test]
+    fn point_cloud_projection_applies_stride() {
+        let filters = ProjectionFilters {
+            point_stride: Some(10),
+            ..ProjectionFilters::default()
+        };
+        let raw = "height: 1\nwidth: 1000\npoint_step: 16\nrow_step: 16000\n";
+        let sample = project_point_cloud_sample(
+            raw,
+            16000,
+            &filters,
+            Some("sensor_msgs/msg/PointCloud2".to_string()),
+        );
+        assert_eq!(sample.input_points, Some(1000));
+        assert_eq!(sample.output_points, Some(100));
+        assert!(sample.output_bytes < sample.input_bytes);
+    }
+}

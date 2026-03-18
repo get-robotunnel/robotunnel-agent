@@ -48,7 +48,7 @@ impl MetricSnapshot {
             mem_total_mb: mem_total,
             disk_used_gb: disk_used,
             disk_total_gb: disk_total,
-            ros_node_count: None, // Populated by rt-skill-ros2 if available
+            ros_node_count: None, // Populated by rt-skill-ros2-observe if available
         })
     }
 
