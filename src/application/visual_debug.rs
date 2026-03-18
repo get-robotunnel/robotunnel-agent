@@ -1,5 +1,6 @@
 use super::projection_plane::engine::{resolve_profile, ProjectionEngine, ProjectionFilters};
 use super::projection_plane::policy::{profile_topic_policy_overrides, TopicPolicySet};
+use super::projection_plane::recommend::build_recommendation;
 use super::projection_plane::stats::collect_topic_stats;
 use super::projection_plane::{ProjectionMode, SessionStartRequest};
 use super::visual_debug_config::VisualDebugSettings;
@@ -16,6 +17,7 @@ pub(super) async fn handle_visual_debug_skill(
         "start" => handle_start(req, engine).await,
         "stop" => handle_stop(req, engine).await,
         "status" => handle_status(req, engine).await,
+        "recommend" => handle_recommend(req, engine).await,
         "topic_stats" => handle_topic_stats(req, engine).await,
         "stream_pull" => handle_stream_pull(req, engine).await,
         other => err(req.id, format!("unknown visual_debug action: {}", other)),
@@ -51,6 +53,12 @@ async fn handle_start(req: CommandRequest, engine: Arc<ProjectionEngine>) -> Com
         .and_then(Value::as_u64)
         .unwrap_or(profile_defaults.desired_delay_ms)
         .clamp(0, 5000);
+    let tf_alignment_window_ms = req
+        .params
+        .get("tf_alignment_window_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(profile_defaults.tf_alignment_window_ms)
+        .clamp(0, 5000);
 
     let filters = ProjectionFilters {
         point_stride: read_u32_param(&req.params, "point_stride").or(profile_defaults.point_stride),
@@ -59,20 +67,7 @@ async fn handle_start(req: CommandRequest, engine: Arc<ProjectionEngine>) -> Com
         hz_limit: read_f64_param(&req.params, "hz_limit").or(profile_defaults.hz_limit),
     };
 
-    let topics = req
-        .params
-        .get("topics")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let topics = parse_topics(&req.params);
 
     let session_name = req
         .params
@@ -96,6 +91,7 @@ async fn handle_start(req: CommandRequest, engine: Arc<ProjectionEngine>) -> Com
             profile: resolved_profile,
             topics,
             desired_delay_ms,
+            tf_alignment_window_ms,
             filters,
             topic_policy,
             vnc_port,
@@ -155,6 +151,49 @@ async fn handle_status(req: CommandRequest, engine: Arc<ProjectionEngine>) -> Co
     ok(req.id, status)
 }
 
+async fn handle_recommend(req: CommandRequest, engine: Arc<ProjectionEngine>) -> CommandResponse {
+    let requested_mode = req
+        .params
+        .get("mode")
+        .and_then(Value::as_str)
+        .map(ProjectionMode::from_str);
+    let mut mode = requested_mode.unwrap_or(ProjectionMode::Foxglove);
+    let transport_policy = req
+        .params
+        .get("transport_policy")
+        .and_then(Value::as_str)
+        .unwrap_or("auto")
+        .trim()
+        .to_string();
+    let mut topics = parse_topics(&req.params);
+    let session_id = req
+        .params
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
+    if topics.is_empty() {
+        if let Some(session_id) = session_id {
+            if let Some(snapshot) = engine.session_snapshot(session_id).await {
+                topics = snapshot.topics;
+                if requested_mode.is_none() {
+                    mode = snapshot.mode;
+                }
+            }
+        }
+    }
+
+    let recommendation = build_recommendation(mode, &transport_policy, &topics).await;
+    ok(
+        req.id,
+        json!({
+            "source": "projection_recommendation",
+            "recommendation": recommendation,
+        }),
+    )
+}
+
 async fn handle_topic_stats(req: CommandRequest, engine: Arc<ProjectionEngine>) -> CommandResponse {
     let Some(topic) = req.params.get("topic").and_then(Value::as_str) else {
         return err(req.id, "missing required param: topic".to_string());
@@ -180,20 +219,36 @@ async fn handle_topic_stats(req: CommandRequest, engine: Arc<ProjectionEngine>) 
     });
 
     match collect_topic_stats(topic, window_sec).await {
-        Ok(stats) => ok(
-            req.id,
-            json!({
-                "source": "projection_stats_collector",
-                "runtime_projection": runtime_payload,
-                "stats": stats,
-            }),
-        ),
+        Ok(stats) => {
+            let collector_sparse = stats.average_hz.is_none()
+                && stats.average_bw.is_none()
+                && stats.average_delay_sec.is_none();
+            let source = if runtime_payload.is_none() {
+                "projection_stats_collector"
+            } else if collector_sparse {
+                "projection_runtime_sampler"
+            } else {
+                "projection_hybrid_sampler"
+            };
+            ok(
+                req.id,
+                json!({
+                    "source": source,
+                    "runtime_primary": runtime_payload.is_some(),
+                    "collector_sparse": collector_sparse,
+                    "runtime_projection": runtime_payload,
+                    "stats": stats,
+                }),
+            )
+        }
         Err(msg) => {
             if let Some(runtime_projection) = runtime_payload {
                 return ok(
                     req.id,
                     json!({
                         "source": "projection_runtime_sampler",
+                        "runtime_primary": true,
+                        "collector_sparse": true,
                         "collector_error": msg,
                         "runtime_projection": runtime_projection,
                     }),
@@ -241,6 +296,22 @@ fn read_u32_param(params: &Value, key: &str) -> Option<u32> {
         .get(key)
         .and_then(Value::as_u64)
         .and_then(|v| u32::try_from(v).ok())
+}
+
+fn parse_topics(params: &Value) -> Vec<String> {
+    params
+        .get("topics")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn read_u16_param(params: &Value, key: &str) -> Option<u16> {

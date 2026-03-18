@@ -49,6 +49,7 @@ pub struct SessionStartRequest {
     pub profile: String,
     pub topics: Vec<String>,
     pub desired_delay_ms: u64,
+    pub tf_alignment_window_ms: u64,
     pub filters: ProjectionFilters,
     pub topic_policy: TopicPolicySet,
     pub vnc_port: Option<u16>,
@@ -65,6 +66,7 @@ pub struct ProjectionSession {
     pub transport_policy: String,
     pub profile: String,
     pub topics: Vec<String>,
+    pub tf_alignment_window_ms: u64,
     pub filters: ProjectionFilters,
     pub topic_policy: TopicPolicySet,
     pub session_buffer: SessionLocalBuffer,
@@ -140,6 +142,7 @@ impl ProjectionEngine {
             transport_policy: req.transport_policy,
             profile: req.profile,
             topics: topics.clone(),
+            tf_alignment_window_ms: req.tf_alignment_window_ms,
             filters: req.filters.clone(),
             topic_policy: req.topic_policy.clone(),
             session_buffer,
@@ -208,22 +211,39 @@ impl ProjectionEngine {
     }
 
     pub async fn status(&self, session_id: Option<&str>) -> serde_json::Value {
-        let guard = self.sessions.lock().await;
+        let mut guard = self.sessions.lock().await;
+        let now = unix_now();
         if let Some(id) = session_id {
-            if let Some(entry) = guard.get(id) {
-                return serde_json::json!({"session": entry.session});
+            if let Some(entry) = guard.get_mut(id) {
+                refresh_success_ages(&mut entry.session.runtime, now);
+                return serde_json::json!({"session": session_status_view(&entry.session)});
             }
             return serde_json::json!({"session": serde_json::Value::Null});
         }
 
         let sessions = guard
-            .values()
-            .map(|entry| entry.session.clone())
+            .values_mut()
+            .map(|entry| {
+                refresh_success_ages(&mut entry.session.runtime, now);
+                session_status_view(&entry.session)
+            })
             .collect::<Vec<_>>();
         serde_json::json!({
             "count": sessions.len(),
             "sessions": sessions,
         })
+    }
+
+    pub async fn session_snapshot(&self, session_id: &str) -> Option<ProjectionSession> {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return None;
+        }
+        let mut guard = self.sessions.lock().await;
+        let now = unix_now();
+        let entry = guard.get_mut(session_id)?;
+        refresh_success_ages(&mut entry.session.runtime, now);
+        Some(entry.session.clone())
     }
 
     pub async fn topic_runtime_stats(
@@ -236,14 +256,17 @@ impl ProjectionEngine {
             return None;
         }
 
-        let guard = self.sessions.lock().await;
+        let mut guard = self.sessions.lock().await;
+        let now = unix_now();
         if let Some(session_id) = session_id {
-            let entry = guard.get(session_id)?;
+            let entry = guard.get_mut(session_id)?;
+            refresh_success_ages(&mut entry.session.runtime, now);
             return find_topic_stats(&entry.session.runtime, topic);
         }
 
         let mut best: Option<(u64, TopicProjectionStats)> = None;
-        for entry in guard.values() {
+        for entry in guard.values_mut() {
+            refresh_success_ages(&mut entry.session.runtime, now);
             if let Some(stats) = find_topic_stats(&entry.session.runtime, topic) {
                 let updated = entry.session.updated_at_unix;
                 let replace = best.as_ref().map(|(ts, _)| updated >= *ts).unwrap_or(true);
@@ -309,6 +332,7 @@ pub fn resolve_profile(profile: &str) -> (String, ProjectionDefaults) {
             image_scale: Some(0.75),
             hz_limit: Some(8.0),
             desired_delay_ms: 80,
+            tf_alignment_window_ms: 250,
         },
     )
 }
@@ -390,9 +414,11 @@ fn apply_topic_success(
     let idx = ensure_topic_index(runtime, topic);
     let stat = &mut runtime.topic_stats[idx];
     stat.status = "ok".to_string();
+    stat.last_sample_status = Some("ok".to_string());
     stat.topic_type = sample.topic_type.clone();
     stat.captures = stat.captures.saturating_add(1);
     stat.last_capture_unix = Some(now_unix);
+    stat.last_success_age = Some(0);
     stat.last_error = None;
     stat.input_bytes = Some(sample.input_bytes);
     stat.output_bytes = Some(sample.output_bytes);
@@ -418,12 +444,119 @@ fn apply_topic_failure(
 ) {
     let idx = ensure_topic_index(runtime, topic);
     let stat = &mut runtime.topic_stats[idx];
-    stat.status = "error".to_string();
+    stat.last_sample_status = Some("error".to_string());
     stat.failures = stat.failures.saturating_add(1);
-    stat.last_capture_unix = Some(now_unix);
+    stat.last_failure_unix = Some(now_unix);
+    if let Some(last_success_unix) = stat.last_capture_unix {
+        stat.status = "ok_with_stale".to_string();
+        stat.last_success_age = Some(now_unix.saturating_sub(last_success_unix));
+    } else {
+        stat.status = "error".to_string();
+        stat.last_success_age = None;
+    }
     stat.last_error = Some(message);
 
     runtime.total_failures = runtime.total_failures.saturating_add(1);
+}
+
+fn refresh_success_ages(runtime: &mut ProjectionRuntimeState, now_unix: u64) {
+    for stat in &mut runtime.topic_stats {
+        stat.last_success_age = stat
+            .last_capture_unix
+            .map(|last_success| now_unix.saturating_sub(last_success));
+    }
+}
+
+fn session_status_view(session: &ProjectionSession) -> serde_json::Value {
+    let mut out = serde_json::to_value(session).unwrap_or_else(|_| serde_json::json!({}));
+    let endpoint_statuses = build_endpoint_statuses(session);
+    let runtime_combined_view = build_runtime_combined_view(session);
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("endpoint_statuses".to_string(), endpoint_statuses);
+        obj.insert("runtime_combined_view".to_string(), runtime_combined_view);
+    }
+    out
+}
+
+fn build_endpoint_statuses(session: &ProjectionSession) -> serde_json::Value {
+    let mut out = Vec::new();
+    if let Some(url) = session.endpoints.foxglove_ws.as_deref() {
+        let bridge = session
+            .bridge_services
+            .iter()
+            .find(|svc| svc.service == "foxglove_bridge");
+        out.push(serde_json::json!({
+            "endpoint": "foxglove",
+            "url": url,
+            "readiness": bridge.map(|v| v.status.as_str()).unwrap_or("unknown"),
+            "service": "foxglove_bridge",
+            "message": bridge.and_then(|v| v.message.clone()),
+        }));
+    }
+    if let Some(url) = session.endpoints.rosbridge_ws.as_deref() {
+        let bridge = session
+            .bridge_services
+            .iter()
+            .find(|svc| svc.service == "rosbridge");
+        out.push(serde_json::json!({
+            "endpoint": "rosbridge",
+            "url": url,
+            "readiness": bridge.map(|v| v.status.as_str()).unwrap_or("unknown"),
+            "service": "rosbridge",
+            "message": bridge.and_then(|v| v.message.clone()),
+        }));
+    }
+    if let Some(url) = session.endpoints.rviz_vnc.as_deref() {
+        let readiness = if session.status == "running" {
+            "running"
+        } else {
+            session.status.as_str()
+        };
+        out.push(serde_json::json!({
+            "endpoint": "rviz_vnc",
+            "url": url,
+            "readiness": readiness,
+            "service": serde_json::Value::Null,
+            "message": "rviz vnc endpoint configured for session",
+        }));
+    }
+    serde_json::Value::Array(out)
+}
+
+fn build_runtime_combined_view(session: &ProjectionSession) -> serde_json::Value {
+    let topics = session
+        .runtime
+        .topic_stats
+        .iter()
+        .map(|stat| {
+            let route = session
+                .topic_routes
+                .iter()
+                .find(|route| route.source_topic == stat.topic);
+            let applied_filters = if stat.applied_filters.is_empty() {
+                route
+                    .map(|route| route.applied_filters.clone())
+                    .unwrap_or_default()
+            } else {
+                stat.applied_filters.clone()
+            };
+            serde_json::json!({
+                "topic": stat.topic,
+                "status": stat.status,
+                "last_success_age": stat.last_success_age,
+                "captures": stat.captures,
+                "failures": stat.failures,
+                "last_error": stat.last_error,
+                "route_status": route.map(|route| route.status.as_str()).unwrap_or("unknown"),
+                "applied_filters": applied_filters,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "desired_delay_ms": session.session_buffer.desired_delay_ms,
+        "tf_alignment_window_ms": session.tf_alignment_window_ms,
+        "topics": topics,
+    })
 }
 
 fn ensure_topic_index(runtime: &mut ProjectionRuntimeState, topic: &str) -> usize {
@@ -524,5 +657,90 @@ mod tests {
         let fast = sample_interval(Some(10.0));
         let slow = sample_interval(Some(0.5));
         assert!(fast < slow);
+    }
+
+    #[test]
+    fn failure_after_success_marks_topic_as_ok_with_stale() {
+        let mut session = ProjectionSession {
+            session_id: "s1".to_string(),
+            session_name: None,
+            status: "running".to_string(),
+            created_at_unix: 0,
+            updated_at_unix: 0,
+            mode: ProjectionMode::StatsOnly,
+            transport_policy: "auto".to_string(),
+            profile: "balanced".to_string(),
+            topics: vec!["/map".to_string()],
+            tf_alignment_window_ms: 250,
+            filters: ProjectionFilters::default(),
+            topic_policy: TopicPolicySet::builtin_defaults(),
+            session_buffer: SessionLocalBuffer::new(80),
+            endpoints: ProjectionEndpoints::default(),
+            bridge_services: Vec::new(),
+            topic_routes: Vec::new(),
+            notes: Vec::new(),
+            runtime: ProjectionRuntimeState::new(&["/map".to_string()]),
+        };
+
+        let sample = TopicProjectionSample {
+            topic_type: Some("nav_msgs/msg/OccupancyGrid".to_string()),
+            input_bytes: 128,
+            output_bytes: 128,
+            input_points: None,
+            output_points: None,
+            input_width_px: None,
+            input_height_px: None,
+            output_width_px: None,
+            output_height_px: None,
+            applied_filters: Vec::new(),
+            input_preview: None,
+            output_preview: None,
+        };
+
+        apply_topic_success(&mut session, "/map", sample, 100);
+        apply_topic_failure(
+            &mut session.runtime,
+            "/map",
+            "timeout after 8s".to_string(),
+            112,
+        );
+
+        let stat = session
+            .runtime
+            .topic_stats
+            .iter()
+            .find(|item| item.topic == "/map")
+            .expect("topic stat");
+        assert_eq!(stat.status, "ok_with_stale");
+        assert_eq!(stat.last_capture_unix, Some(100));
+        assert_eq!(stat.last_failure_unix, Some(112));
+        assert_eq!(stat.last_success_age, Some(12));
+        assert_eq!(stat.last_sample_status.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn failure_without_success_stays_error() {
+        let mut runtime = ProjectionRuntimeState::new(&["/map".to_string()]);
+        apply_topic_failure(&mut runtime, "/map", "timeout after 8s".to_string(), 20);
+        let stat = runtime
+            .topic_stats
+            .iter()
+            .find(|item| item.topic == "/map")
+            .expect("topic stat");
+        assert_eq!(stat.status, "error");
+        assert_eq!(stat.last_capture_unix, None);
+        assert_eq!(stat.last_failure_unix, Some(20));
+        assert_eq!(stat.last_success_age, None);
+    }
+
+    #[test]
+    fn refresh_success_ages_updates_age_from_last_success() {
+        let mut runtime = ProjectionRuntimeState::new(&["/map".to_string()]);
+        let idx = ensure_topic_index(&mut runtime, "/map");
+        runtime.topic_stats[idx].last_capture_unix = Some(42);
+        runtime.topic_stats[idx].status = "ok_with_stale".to_string();
+
+        refresh_success_ages(&mut runtime, 50);
+        assert_eq!(runtime.topic_stats[idx].last_success_age, Some(8));
     }
 }

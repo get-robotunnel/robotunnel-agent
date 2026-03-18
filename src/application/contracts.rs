@@ -293,6 +293,12 @@ impl BuiltinContracts {
                                 "Target visualization delay in milliseconds.",
                             ),
                             param(
+                                "tf_alignment_window_ms",
+                                ParamType::Integer,
+                                false,
+                                "TF alignment window in milliseconds for visual playback synchronization.",
+                            ),
+                            param(
                                 "point_stride",
                                 ParamType::Integer,
                                 false,
@@ -355,6 +361,37 @@ impl BuiltinContracts {
                             false,
                             "Optional projection session identifier.",
                         )],
+                    },
+                    ActionContract {
+                        name: "recommend",
+                        description:
+                            "Recommend profile and per-topic policy overrides from transport preference and topic mix.",
+                        params: vec![
+                            param(
+                                "mode",
+                                ParamType::String,
+                                false,
+                                "foxglove, rviz_vnc, or stats_only.",
+                            ),
+                            param(
+                                "transport_policy",
+                                ParamType::String,
+                                false,
+                                "Session transport preference, for example tcp_only.",
+                            ),
+                            param(
+                                "topics",
+                                ParamType::Array,
+                                false,
+                                "Optional list of ROS 2 topics used for recommendation.",
+                            ),
+                            param(
+                                "session_id",
+                                ParamType::String,
+                                false,
+                                "Use an existing session topic set when topics is omitted.",
+                            ),
+                        ],
                     },
                     ActionContract {
                         name: "topic_stats",

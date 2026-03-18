@@ -4,6 +4,7 @@ pub mod buffers;
 pub mod engine;
 pub mod policy;
 pub mod profiles;
+pub mod recommend;
 pub mod runtime;
 pub mod stats;
 pub mod transforms;

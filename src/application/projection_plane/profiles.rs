@@ -14,6 +14,7 @@ pub struct ProjectionDefaults {
     pub image_scale: Option<f64>,
     pub hz_limit: Option<f64>,
     pub desired_delay_ms: u64,
+    pub tf_alignment_window_ms: u64,
 }
 
 pub fn builtin_profiles() -> Vec<ProjectionProfile> {
@@ -27,6 +28,7 @@ pub fn builtin_profiles() -> Vec<ProjectionProfile> {
                 image_scale: Some(0.75),
                 hz_limit: Some(8.0),
                 desired_delay_ms: 80,
+                tf_alignment_window_ms: 250,
             },
         },
         ProjectionProfile {
@@ -38,6 +40,7 @@ pub fn builtin_profiles() -> Vec<ProjectionProfile> {
                 image_scale: Some(0.5),
                 hz_limit: Some(5.0),
                 desired_delay_ms: 150,
+                tf_alignment_window_ms: 250,
             },
         },
         ProjectionProfile {
@@ -49,6 +52,7 @@ pub fn builtin_profiles() -> Vec<ProjectionProfile> {
                 image_scale: Some(0.4),
                 hz_limit: Some(6.0),
                 desired_delay_ms: 120,
+                tf_alignment_window_ms: 250,
             },
         },
         ProjectionProfile {
@@ -61,6 +65,7 @@ pub fn builtin_profiles() -> Vec<ProjectionProfile> {
                 image_scale: None,
                 hz_limit: Some(2.0),
                 desired_delay_ms: 200,
+                tf_alignment_window_ms: 250,
             },
         },
         ProjectionProfile {
@@ -73,6 +78,7 @@ pub fn builtin_profiles() -> Vec<ProjectionProfile> {
                 image_scale: None,
                 hz_limit: Some(8.0),
                 desired_delay_ms: 120,
+                tf_alignment_window_ms: 250,
             },
         },
         ProjectionProfile {
@@ -85,6 +91,7 @@ pub fn builtin_profiles() -> Vec<ProjectionProfile> {
                 image_scale: None,
                 hz_limit: Some(6.0),
                 desired_delay_ms: 150,
+                tf_alignment_window_ms: 250,
             },
         },
     ]

@@ -278,6 +278,8 @@ If the tag version and `Cargo.toml` version do not match, the workflow fails ear
 
 ## Built-in Skills (Default, Always Available)
 
+Detailed documentation for all skills can be found at [docs.robotunnel.io/skills](https://robotunnel.io/docs/skills.html).
+
 These four scenarios are provided by the platform. The generic low-level CLI entry point is always:
 
 ```bash

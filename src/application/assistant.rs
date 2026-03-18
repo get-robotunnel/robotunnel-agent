@@ -254,9 +254,10 @@ Available tools:
 - ros2_observe.topic_stats {"topic":string,"window_sec"?:integer}
 - ros2_observe.stream_endpoint {"transport"?:string,"port"?:integer}
 - visual_debug.list_profiles {}
-- visual_debug.start {"mode"?:string,"profile"?:string,"transport_policy"?:string,"topics"?:array,"desired_delay_ms"?:integer,"topic_policy"?:object}
+- visual_debug.start {"mode"?:string,"profile"?:string,"transport_policy"?:string,"topics"?:array,"desired_delay_ms"?:integer,"tf_alignment_window_ms"?:integer,"topic_policy"?:object}
 - visual_debug.stop {"session_id":string}
 - visual_debug.status {"session_id"?:string}
+- visual_debug.recommend {"mode"?:string,"transport_policy"?:string,"topics"?:array,"session_id"?:string}
 - visual_debug.topic_stats {"topic":string,"session_id"?:string,"window_sec"?:integer}
 - visual_debug.stream_pull {"session_id":string,"topic":string,"since_seq"?:integer,"limit"?:integer}
 - system.config_get {"section":"monitor|visual_debug"}
@@ -629,14 +630,31 @@ fn format_tool_reply(tool: &ToolCallSpec, response: &CommandResponse) -> String 
             let count = data.get("count").and_then(Value::as_u64).unwrap_or(0);
             format!("Visual debug has {} active projection session(s).", count)
         }
+        ("visual_debug", "recommend") => {
+            let profile =
+                nested_string_field(data, &["recommendation", "profile"]).unwrap_or("balanced");
+            let reasons = nested_array_len(data, &["recommendation", "reasons"]);
+            format!(
+                "Visual debug recommendation: profile `{}` ({} reason item(s)).",
+                profile, reasons
+            )
+        }
         ("visual_debug", "topic_stats") => {
             let topic = nested_string_field(data, &["stats", "topic"]).unwrap_or("unknown");
-            let hz = nested_number_field(data, &["stats", "average_hz"]).unwrap_or(0.0);
-            let runtime_captures =
-                nested_u64_field(data, &["runtime_projection", "stats", "captures"]).unwrap_or(0);
+            let source = string_field(data, "source").unwrap_or("unknown");
+            let collector_sparse = data
+                .get("collector_sparse")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let runtime_status =
+                nested_string_field(data, &["runtime_projection", "stats", "status"])
+                    .unwrap_or("unknown");
+            let last_success_age =
+                nested_u64_field(data, &["runtime_projection", "stats", "last_success_age"])
+                    .unwrap_or(0);
             format!(
-                "Visual debug topic stats for `{}`: {:.2} Hz (runtime captures {}).",
-                topic, hz, runtime_captures
+                "Visual debug topic stats for `{}`: source={}, status={}, stale_age={}s, collector_sparse={}.",
+                topic, source, runtime_status, last_success_age, collector_sparse
             )
         }
         ("visual_debug", "stream_pull") => {
@@ -759,6 +777,17 @@ fn nested_u64_field(data: &Value, path: &[&str]) -> Option<u64> {
         current = current.get(*key)?;
     }
     current.as_u64()
+}
+
+fn nested_array_len(data: &Value, path: &[&str]) -> usize {
+    let mut current = data;
+    for key in path {
+        let Some(next) = current.get(*key) else {
+            return 0;
+        };
+        current = next;
+    }
+    current.as_array().map(|items| items.len()).unwrap_or(0)
 }
 
 fn ok_response(id: String, data: Value) -> CommandResponse {
