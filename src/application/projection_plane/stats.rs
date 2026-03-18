@@ -37,9 +37,17 @@ pub async fn collect_topic_stats(topic: &str, window_sec: u64) -> Result<TopicSt
         shell_quote(topic)
     );
 
-    let hz_out = run_shell(&hz_cmd, window_sec + 3).await?;
-    let bw_out = run_shell(&bw_cmd, window_sec + 3).await?;
-    let delay_out = run_shell(&delay_cmd, window_sec + 3).await?;
+    // Run collectors in parallel so end-to-end latency is ~window_sec
+    // instead of three sequential windows.
+    let (hz_res, bw_res, delay_res) = tokio::join!(
+        run_shell(&hz_cmd, window_sec + 3),
+        run_shell(&bw_cmd, window_sec + 3),
+        run_shell(&delay_cmd, window_sec + 3),
+    );
+
+    let hz_out = hz_res.unwrap_or_else(|err| format!("collector_error: {}", err));
+    let bw_out = bw_res.unwrap_or_else(|err| format!("collector_error: {}", err));
+    let delay_out = delay_res.unwrap_or_else(|err| format!("collector_error: {}", err));
 
     Ok(TopicStats {
         topic: topic.to_string(),
