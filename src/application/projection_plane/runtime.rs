@@ -409,6 +409,7 @@ async fn run_ros2_cmd(args: &[&str], timeout_sec: u64) -> Result<String, String>
 
 async fn run_command(mut cmd: Command, timeout_sec: u64) -> Result<String, String> {
     let duration = Duration::from_secs(timeout_sec.clamp(2, 30));
+    cmd.kill_on_drop(true);
     let output = timeout(duration, cmd.output())
         .await
         .map_err(|_| format!("timeout after {}s", duration.as_secs()))?
