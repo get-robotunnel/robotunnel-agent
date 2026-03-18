@@ -136,26 +136,117 @@ async fn resolve_topic_type(topic: &str, preferred_topic_type: Option<&str>) -> 
 
 async fn read_topic_sample(topic: &str, topic_type: Option<&str>) -> Result<String, String> {
     let mut last_err: Option<String> = None;
-
-    if let Some(topic_type) = sanitize_topic_type(topic_type) {
-        for transient_local in [false, true] {
-            match run_topic_echo(topic, Some(topic_type), transient_local, 8).await {
-                Ok(out) if !out.trim().is_empty() => return Ok(out),
-                Ok(_) => last_err = Some("empty topic sample".to_string()),
-                Err(err) => last_err = Some(err),
+    for attempt in build_topic_echo_attempts(topic, topic_type) {
+        match run_topic_echo(
+            topic,
+            attempt.topic_type,
+            attempt.transient_local,
+            attempt.timeout_sec,
+        )
+        .await
+        {
+            Ok(out) if !out.trim().is_empty() => return Ok(out),
+            Ok(_) => {
+                last_err = Some(format!(
+                    "empty topic sample (transient_local={})",
+                    attempt.transient_local
+                ))
+            }
+            Err(err) => {
+                last_err = Some(format!(
+                    "{} (transient_local={})",
+                    err, attempt.transient_local
+                ))
             }
         }
     }
 
-    for transient_local in [false, true] {
-        match run_topic_echo(topic, None, transient_local, 8).await {
-            Ok(out) if !out.trim().is_empty() => return Ok(out),
-            Ok(_) => last_err = Some("empty topic sample".to_string()),
-            Err(err) => last_err = Some(err),
+    Err(last_err.unwrap_or_else(|| "failed to sample topic".to_string()))
+}
+
+#[derive(Clone, Copy)]
+struct TopicEchoAttempt<'a> {
+    topic_type: Option<&'a str>,
+    transient_local: bool,
+    timeout_sec: u64,
+}
+
+fn build_topic_echo_attempts<'a>(
+    topic: &str,
+    topic_type: Option<&'a str>,
+) -> Vec<TopicEchoAttempt<'a>> {
+    let mut attempts = Vec::new();
+    let low_frequency = is_low_frequency_topic(topic, topic_type);
+    if let Some(topic_type) = sanitize_topic_type(topic_type) {
+        if low_frequency {
+            attempts.push(TopicEchoAttempt {
+                topic_type: Some(topic_type),
+                transient_local: true,
+                timeout_sec: 6,
+            });
+            attempts.push(TopicEchoAttempt {
+                topic_type: Some(topic_type),
+                transient_local: false,
+                timeout_sec: 4,
+            });
+        } else {
+            attempts.push(TopicEchoAttempt {
+                topic_type: Some(topic_type),
+                transient_local: false,
+                timeout_sec: 4,
+            });
+            attempts.push(TopicEchoAttempt {
+                topic_type: Some(topic_type),
+                transient_local: true,
+                timeout_sec: 3,
+            });
         }
     }
 
-    Err(last_err.unwrap_or_else(|| "failed to sample topic".to_string()))
+    if low_frequency {
+        attempts.push(TopicEchoAttempt {
+            topic_type: None,
+            transient_local: true,
+            timeout_sec: 4,
+        });
+        attempts.push(TopicEchoAttempt {
+            topic_type: None,
+            transient_local: false,
+            timeout_sec: 3,
+        });
+    } else {
+        attempts.push(TopicEchoAttempt {
+            topic_type: None,
+            transient_local: false,
+            timeout_sec: 4,
+        });
+        attempts.push(TopicEchoAttempt {
+            topic_type: None,
+            transient_local: true,
+            timeout_sec: 3,
+        });
+    }
+
+    attempts
+}
+
+fn is_low_frequency_topic(topic: &str, topic_type: Option<&str>) -> bool {
+    let normalized_topic = topic.trim().to_ascii_lowercase();
+    if normalized_topic == "/map"
+        || normalized_topic.ends_with("/map")
+        || normalized_topic.ends_with("/map_metadata")
+        || normalized_topic == "/tf_static"
+    {
+        return true;
+    }
+
+    if let Some(topic_type) = sanitize_topic_type(topic_type) {
+        return matches!(
+            topic_type,
+            "nav_msgs/msg/OccupancyGrid" | "nav_msgs/msg/MapMetaData"
+        );
+    }
+    false
 }
 
 fn project_image_sample(
@@ -456,5 +547,32 @@ mod tests {
         assert_eq!(sample.input_points, Some(1000));
         assert_eq!(sample.output_points, Some(100));
         assert!(sample.output_bytes < sample.input_bytes);
+    }
+
+    #[test]
+    fn low_frequency_sampling_prefers_transient_local_first() {
+        let attempts = build_topic_echo_attempts("/map", Some("nav_msgs/msg/OccupancyGrid"));
+        assert_eq!(attempts.len(), 4);
+        assert!(attempts[0].transient_local);
+        assert_eq!(attempts[0].timeout_sec, 6);
+        assert!(!attempts[1].transient_local);
+    }
+
+    #[test]
+    fn high_frequency_sampling_prefers_volatile_first() {
+        let attempts = build_topic_echo_attempts("/scan", Some("sensor_msgs/msg/LaserScan"));
+        assert_eq!(attempts.len(), 4);
+        assert!(!attempts[0].transient_local);
+        assert_eq!(attempts[0].timeout_sec, 4);
+        assert!(attempts[1].transient_local);
+    }
+
+    #[test]
+    fn low_frequency_topic_detection_accepts_tf_static_name() {
+        assert!(is_low_frequency_topic("/tf_static", None));
+        assert!(!is_low_frequency_topic(
+            "/scan",
+            Some("sensor_msgs/msg/LaserScan")
+        ));
     }
 }
