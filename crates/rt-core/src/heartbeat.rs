@@ -1,5 +1,7 @@
 //! Heartbeat service — periodically reports agent status to the platform.
 
+use std::fs;
+use std::path::Path;
 use std::time::Duration;
 use tokio::sync::watch;
 use tracing;
@@ -100,6 +102,7 @@ fn build_network_profile(local_ip: Option<&str>) -> Option<NetworkProfilePayload
     if let Some(ip) = local_ip.map(str::trim).filter(|s| !s.is_empty()) {
         private_addrs.push(ip.to_string());
     }
+    let network_tags = detect_network_tags(local_ip);
 
     Some(NetworkProfilePayload {
         private_addrs,
@@ -111,8 +114,60 @@ fn build_network_profile(local_ip: Option<&str>) -> Option<NetworkProfilePayload
             "turn_relay".to_string(),
             "vps_relay".to_string(),
         ],
-        network_tags: Vec::new(),
+        network_tags,
     })
+}
+
+fn detect_network_tags(local_ip: Option<&str>) -> Vec<String> {
+    let mut tags = Vec::new();
+    let docker_env = Path::new("/.dockerenv").exists();
+    let cgroup = fs::read_to_string("/proc/1/cgroup")
+        .unwrap_or_default()
+        .to_lowercase();
+    let docker_cgroup = cgroup.contains("docker");
+    let container_cgroup = docker_cgroup
+        || cgroup.contains("containerd")
+        || cgroup.contains("kubepods")
+        || cgroup.contains("libpod");
+
+    if docker_env || docker_cgroup {
+        push_tag(&mut tags, "runtime:docker");
+        push_tag(&mut tags, "runtime:container");
+    } else if container_cgroup {
+        push_tag(&mut tags, "runtime:container");
+    }
+
+    if tags.iter().any(|tag| tag == "runtime:container") {
+        push_tag(&mut tags, "network:containerized");
+    }
+
+    if tags.iter().any(|tag| tag == "runtime:docker")
+        && local_ip
+            .map(str::trim)
+            .filter(|ip| !ip.is_empty())
+            .is_some_and(is_likely_docker_bridge_ipv4)
+    {
+        push_tag(&mut tags, "network:docker_bridge");
+        push_tag(&mut tags, "network:container_nat");
+    }
+
+    tags
+}
+
+fn push_tag(tags: &mut Vec<String>, tag: &str) {
+    if tags.iter().any(|existing| existing == tag) {
+        return;
+    }
+    tags.push(tag.to_string());
+}
+
+fn is_likely_docker_bridge_ipv4(ip: &str) -> bool {
+    let parsed = match ip.trim().parse::<std::net::Ipv4Addr>() {
+        Ok(ip) => ip,
+        Err(_) => return false,
+    };
+    let octets = parsed.octets();
+    octets[0] == 172 && (17..=31).contains(&octets[1])
 }
 
 /// Best-effort local IP detection.
