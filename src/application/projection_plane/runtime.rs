@@ -77,14 +77,15 @@ pub struct TopicProjectionSample {
 pub async fn sample_topic_projection(
     topic: &str,
     filters: &ProjectionFilters,
+    preferred_topic_type: Option<&str>,
 ) -> Result<TopicProjectionSample, String> {
     let topic = topic.trim();
     if topic.is_empty() {
         return Err("empty topic".to_string());
     }
 
-    let topic_type = read_topic_type(topic).await.ok();
-    let sample = run_ros2_cmd(&["topic", "echo", topic, "--once"], 8).await?;
+    let topic_type = resolve_topic_type(topic, preferred_topic_type).await;
+    let sample = read_topic_sample(topic, topic_type.as_deref()).await?;
     let raw_bytes = sample.len() as u64;
 
     if let Some(tt) = topic_type.as_deref() {
@@ -114,6 +115,44 @@ pub async fn sample_topic_projection(
         input_preview: preview_text(&sample, 220),
         output_preview: preview_text(&sample, 220),
     })
+}
+
+async fn resolve_topic_type(topic: &str, preferred_topic_type: Option<&str>) -> Option<String> {
+    if let Some(preferred) = sanitize_topic_type(preferred_topic_type) {
+        return Some(preferred.to_string());
+    }
+
+    for _ in 0..3 {
+        if let Ok(kind) = read_topic_type(topic).await {
+            return Some(kind);
+        }
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+    None
+}
+
+async fn read_topic_sample(topic: &str, topic_type: Option<&str>) -> Result<String, String> {
+    let mut last_err: Option<String> = None;
+
+    if let Some(topic_type) = sanitize_topic_type(topic_type) {
+        for transient_local in [false, true] {
+            match run_topic_echo(topic, Some(topic_type), transient_local, 8).await {
+                Ok(out) if !out.trim().is_empty() => return Ok(out),
+                Ok(_) => last_err = Some("empty topic sample".to_string()),
+                Err(err) => last_err = Some(err),
+            }
+        }
+    }
+
+    for transient_local in [false, true] {
+        match run_topic_echo(topic, None, transient_local, 8).await {
+            Ok(out) if !out.trim().is_empty() => return Ok(out),
+            Ok(_) => last_err = Some("empty topic sample".to_string()),
+            Err(err) => last_err = Some(err),
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| "failed to sample topic".to_string()))
 }
 
 fn project_image_sample(
@@ -233,18 +272,48 @@ fn project_point_cloud_sample(
 }
 
 async fn read_topic_type(topic: &str) -> Result<String, String> {
-    let raw = run_ros2_cmd(&["topic", "type", topic], 4).await?;
-    let v = raw.trim().to_string();
-    if v.is_empty() {
-        return Err("empty topic type".to_string());
+    if let Ok(raw) = run_ros2_cmd(&["topic", "type", topic], 4).await {
+        if let Some(v) = parse_topic_type_output(&raw) {
+            return Ok(v);
+        }
     }
-    Ok(v)
+
+    let raw = run_ros2_cmd(&["topic", "list", "-t"], 4).await?;
+    if let Some(v) = parse_topic_type_from_list(&raw, topic) {
+        return Ok(v);
+    }
+
+    Err("empty topic type".to_string())
+}
+
+async fn run_topic_echo(
+    topic: &str,
+    topic_type: Option<&str>,
+    transient_local: bool,
+    timeout_sec: u64,
+) -> Result<String, String> {
+    let mut cmd = Command::new("ros2");
+    cmd.arg("topic").arg("echo").arg(topic);
+
+    if let Some(topic_type) = sanitize_topic_type(topic_type) {
+        cmd.arg(topic_type);
+    }
+
+    cmd.arg("--once");
+    if transient_local {
+        cmd.args(["--qos-durability", "transient_local"]);
+    }
+
+    run_command(cmd, timeout_sec).await
 }
 
 async fn run_ros2_cmd(args: &[&str], timeout_sec: u64) -> Result<String, String> {
     let mut cmd = Command::new("ros2");
     cmd.args(args);
+    run_command(cmd, timeout_sec).await
+}
 
+async fn run_command(mut cmd: Command, timeout_sec: u64) -> Result<String, String> {
     let duration = Duration::from_secs(timeout_sec.clamp(2, 30));
     let output = timeout(duration, cmd.output())
         .await
@@ -255,12 +324,44 @@ async fn run_ros2_cmd(args: &[&str], timeout_sec: u64) -> Result<String, String>
         let stderr = String::from_utf8_lossy(&output.stderr);
         let msg = stderr.trim();
         if msg.is_empty() {
-            return Err(format!("ros2 {:?} exited with {}", args, output.status));
+            return Err(format!("ros2 command exited with {}", output.status));
         }
         return Err(msg.to_string());
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn sanitize_topic_type(topic_type: Option<&str>) -> Option<&str> {
+    topic_type.map(str::trim).filter(|v| !v.is_empty())
+}
+
+fn parse_topic_type_output(raw: &str) -> Option<String> {
+    raw.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToString::to_string)
+}
+
+fn parse_topic_type_from_list(raw: &str, topic: &str) -> Option<String> {
+    let topic = topic.trim();
+    if topic.is_empty() {
+        return None;
+    }
+
+    for line in raw.lines() {
+        let line = line.trim();
+        if !line.starts_with(topic) {
+            continue;
+        }
+        let open = line.find('[')?;
+        let close = line[open + 1..].find(']')?;
+        let candidate = line[open + 1..open + 1 + close].trim();
+        if !candidate.is_empty() {
+            return Some(candidate.to_string());
+        }
+    }
+    None
 }
 
 fn parse_u64_line(raw: &str, key: &str) -> Option<u64> {

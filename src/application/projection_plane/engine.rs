@@ -324,6 +324,8 @@ async fn run_projection_worker(
         return;
     }
 
+    let mut topic_type_cache: HashMap<String, String> = HashMap::new();
+
     loop {
         if *stop_rx.borrow() {
             break;
@@ -334,7 +336,18 @@ async fn run_projection_worker(
                 break;
             }
 
-            let sampled = sample_topic_projection(topic, &filters).await;
+            let preferred_type = topic_type_cache.get(topic).map(String::as_str);
+            let sampled = sample_topic_projection(topic, &filters, preferred_type).await;
+            if let Ok(sample) = sampled.as_ref() {
+                if let Some(topic_type) = sample
+                    .topic_type
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    topic_type_cache.insert(topic.clone(), topic_type.to_string());
+                }
+            }
             let now = unix_now();
             let mut guard = sessions.lock().await;
             let Some(entry) = guard.get_mut(&session_id) else {
