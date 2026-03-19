@@ -240,6 +240,8 @@ robotunnel-agent keys remove openai
 
 Keys are stored in `~/.config/robotunnel/agent.keys`. The file is AES-256-GCM encrypted using a key derived from your machine's hardware ID. Even if someone copies this file to another machine, it cannot be decrypted.
 
+Provider selection is explicit for fleet/acceptance execution. The platform does not auto-fallback from one provider to another (for example, OpenAI to Kimi). If the selected provider key is missing on the coordinator robot, the platform returns `error_code=llm_key_missing` with a direct remediation hint.
+
 Monitor alert settings are also local to the robot:
 
 ```bash
@@ -311,6 +313,8 @@ robotunnel skill robot-abc123 visual_debug list_profiles
 robotunnel skill robot-abc123 visual_debug start --params '{"mode":"foxglove","transport_policy":"tcp_only","profile":"balanced","desired_delay_ms":120}'
 ```
 
+`host_debug.shell` is disabled by default. Enable it explicitly with `RT_DEBUG_SHELL_ENABLED=true` only in trusted environments.
+
 ### 2. Proactive Fleet Monitoring (`rt-skill-monitor`)
 The agent continuously samples health metrics and pushes alerts to you when anomalies are detected — without you having to ask.
 
@@ -341,6 +345,9 @@ Ask why one robot is behaving differently from the rest. The platform collects h
 robotunnel skill robot-1 fleet compare \
   --params '{"query":"Why is robot-3 moving slower than the others?","provider":"openai","robot_ids":["robot-1","robot-2","robot-3"]}'
 ```
+
+If the coordinator robot has no key for the selected provider, CLI and Discord now surface the exact setup command shape:
+`robotunnel-agent keys set <provider> <api-key>`.
 
 ### 4. Acceptance Testing (`rt-skill-acceptance`)
 Describe a task in plain language. The platform gathers current observations from the selected robots, then one coordinator agent decomposes the task and returns a pass/fail report.
