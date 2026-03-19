@@ -50,17 +50,6 @@ impl TopicStreamBuffer {
         self.messages.push_back(message);
     }
 
-    pub fn pull(&self, since_seq: Option<u64>, limit: usize) -> Vec<StreamMessage> {
-        let limit = limit.max(1).min(self.max_messages);
-        let since = since_seq.unwrap_or(0);
-        self.messages
-            .iter()
-            .filter(|msg| msg.seq > since)
-            .take(limit)
-            .cloned()
-            .collect()
-    }
-
     pub fn pull_since(&self, since_seq: Option<u64>) -> Vec<StreamMessage> {
         let since = since_seq.unwrap_or(0);
         self.messages
@@ -110,20 +99,6 @@ impl SessionLocalBuffer {
             .entry(topic.to_string())
             .or_insert_with(|| TopicStreamBuffer::new(self.max_messages_per_topic));
         entry.push(message);
-    }
-
-    pub fn pull_messages(
-        &self,
-        topic: &str,
-        since_seq: Option<u64>,
-        limit: usize,
-    ) -> Option<Vec<StreamMessage>> {
-        let topic = topic.trim();
-        if topic.is_empty() {
-            return None;
-        }
-        let entry = self.topics.get(topic)?;
-        Some(entry.pull(since_seq, limit))
     }
 
     pub fn pull_messages_since(
@@ -219,7 +194,7 @@ mod tests {
             },
         );
         let pulled = session
-            .pull_messages("/image", Some(1), 8)
+            .pull_messages_since("/image", Some(1))
             .expect("buffer should exist");
         assert_eq!(pulled.len(), 1);
         assert_eq!(pulled[0].seq, 2);
