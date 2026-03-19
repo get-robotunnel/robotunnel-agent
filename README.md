@@ -315,6 +315,12 @@ robotunnel skill robot-abc123 visual_debug start --params '{"mode":"foxglove","t
 
 `host_debug.shell` is disabled by default. Enable it explicitly with `RT_DEBUG_SHELL_ENABLED=true` only in trusted environments.
 
+`visual_debug` in `mode=rviz_vnc` now starts with secure defaults:
+
+- VNC binds to localhost by default (`RT_RVIZ_VNC_LOCALHOST_ONLY=1`).
+- Public/non-localhost bind requires explicit auth (`RT_RVIZ_VNC_PASSWORD_FILE` or `RT_RVIZ_VNC_PASSWORD`), unless you explicitly opt into `RT_RVIZ_VNC_ALLOW_NO_PASSWORD=1`.
+- The launcher keeps `rviz2`/`x11vnc`/`Xvfb` under one lifecycle and cleans up child processes on stop.
+
 ### 2. Proactive Fleet Monitoring (`rt-skill-monitor`)
 The agent continuously samples health metrics and pushes alerts to you when anomalies are detected — without you having to ask.
 

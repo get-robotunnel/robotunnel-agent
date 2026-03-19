@@ -106,3 +106,33 @@ fn parse_bw_value(raw: &str) -> Option<String> {
 fn shell_quote(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_bw_value, parse_metric_value, shell_quote};
+
+    #[test]
+    fn parse_metric_value_extracts_average() {
+        let raw = "average rate: 12.345\nmin: 1.0";
+        assert_eq!(parse_metric_value(raw, "average rate:"), Some(12.345));
+    }
+
+    #[test]
+    fn parse_metric_value_returns_none_on_sparse_output() {
+        let raw = "no new messages";
+        assert_eq!(parse_metric_value(raw, "average rate:"), None);
+        assert_eq!(parse_metric_value(raw, "average delay:"), None);
+    }
+
+    #[test]
+    fn parse_bw_value_extracts_human_readable_bandwidth() {
+        let raw = "average: 15.63KB/s";
+        assert_eq!(parse_bw_value(raw), Some("15.63KB/s".to_string()));
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quote() {
+        let quoted = shell_quote("/tmp/te'st");
+        assert_eq!(quoted, "/tmp/te'\\''st");
+    }
+}

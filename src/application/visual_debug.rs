@@ -1,4 +1,6 @@
-use super::projection_plane::engine::{resolve_profile, ProjectionEngine, ProjectionFilters};
+use super::projection_plane::engine::{
+    resolve_profile, ProjectionEngine, ProjectionFilters, TopicRuntimeView,
+};
 use super::projection_plane::policy::{profile_topic_policy_overrides, TopicPolicySet};
 use super::projection_plane::recommend::build_recommendation;
 use super::projection_plane::stats::collect_topic_stats;
@@ -210,31 +212,43 @@ async fn handle_topic_stats(req: CommandRequest, engine: Arc<ProjectionEngine>) 
         .map(str::trim)
         .filter(|v| !v.is_empty());
 
-    let runtime_stats = engine.topic_runtime_stats(topic, session_id).await;
-    let runtime_payload = runtime_stats.as_ref().map(|stats| {
-        json!({
-            "source": "projection_runtime_sampler",
-            "stats": stats,
-        })
-    });
+    let runtime_view = engine
+        .topic_runtime_view(topic, session_id, window_sec)
+        .await;
+    let runtime_payload = runtime_view
+        .as_ref()
+        .map(|view| build_runtime_projection_payload(view, window_sec));
+
+    if let Some(view) = runtime_view.as_ref() {
+        if view.estimated.sample_count > 0 {
+            return ok(
+                req.id,
+                json!({
+                    "source": "projection_runtime_sampler",
+                    "runtime_primary": true,
+                    "collector_sparse": view.estimated.collector_sparse_hint,
+                    "runtime_projection": runtime_payload,
+                    "stats": build_runtime_stats_view(view, window_sec),
+                }),
+            );
+        }
+    }
 
     match collect_topic_stats(topic, window_sec).await {
         Ok(stats) => {
             let collector_sparse = stats.average_hz.is_none()
                 && stats.average_bw.is_none()
                 && stats.average_delay_sec.is_none();
-            let source = if runtime_payload.is_none() {
-                "projection_stats_collector"
-            } else if collector_sparse {
-                "projection_runtime_sampler"
-            } else {
+            let source = if runtime_payload.is_some() {
                 "projection_hybrid_sampler"
+            } else {
+                "projection_stats_collector"
             };
             ok(
                 req.id,
                 json!({
                     "source": source,
-                    "runtime_primary": runtime_payload.is_some(),
+                    "runtime_primary": false,
                     "collector_sparse": collector_sparse,
                     "runtime_projection": runtime_payload,
                     "stats": stats,
@@ -242,7 +256,7 @@ async fn handle_topic_stats(req: CommandRequest, engine: Arc<ProjectionEngine>) 
             )
         }
         Err(msg) => {
-            if let Some(runtime_projection) = runtime_payload {
+            if let Some(view) = runtime_view.as_ref() {
                 return ok(
                     req.id,
                     json!({
@@ -250,7 +264,8 @@ async fn handle_topic_stats(req: CommandRequest, engine: Arc<ProjectionEngine>) 
                         "runtime_primary": true,
                         "collector_sparse": true,
                         "collector_error": msg,
-                        "runtime_projection": runtime_projection,
+                        "runtime_projection": runtime_payload,
+                        "stats": build_runtime_stats_view(view, window_sec),
                     }),
                 );
             }
@@ -319,6 +334,58 @@ fn read_u16_param(params: &Value, key: &str) -> Option<u16> {
         .get(key)
         .and_then(Value::as_u64)
         .and_then(|v| u16::try_from(v).ok())
+}
+
+fn build_runtime_projection_payload(view: &TopicRuntimeView, window_sec: u64) -> Value {
+    json!({
+        "source": "projection_runtime_sampler",
+        "topic_resolution": {
+            "requested_topic": view.requested_topic,
+            "source_topic": view.source_topic,
+            "projected_topic": view.projected_topic,
+            "route_status": view.route_status,
+        },
+        "stats": view.stats,
+        "estimated": {
+            "sample_count": view.estimated.sample_count,
+            "sample_window_sec": view.estimated.sample_window_sec,
+            "average_hz": view.estimated.average_hz,
+            "average_bw": view.estimated.average_bw,
+            "average_bw_bps": view.estimated.average_bw_bps,
+            "average_delay_sec": view.estimated.average_delay_sec,
+            "collector_sparse_hint": view.estimated.collector_sparse_hint,
+            "window_sec": window_sec,
+        },
+    })
+}
+
+fn build_runtime_stats_view(view: &TopicRuntimeView, window_sec: u64) -> Value {
+    json!({
+        "topic": view.source_topic,
+        "requested_topic": view.requested_topic,
+        "window_sec": window_sec,
+        "average_hz": view.estimated.average_hz,
+        "average_bw": view.estimated.average_bw,
+        "average_delay_sec": view.estimated.average_delay_sec,
+        "raw_hz": format!(
+            "runtime_estimate sample_count={} window_sec={:.3}",
+            view.estimated.sample_count, view.estimated.sample_window_sec
+        ),
+        "raw_bw": format!(
+            "runtime_estimate average_bw_bps={}",
+            view.estimated
+                .average_bw_bps
+                .map(|v| format!("{:.4}", v))
+                .unwrap_or_else(|| "n/a".to_string())
+        ),
+        "raw_delay": format!(
+            "runtime_estimate desired_delay_sec={}",
+            view.estimated
+                .average_delay_sec
+                .map(|v| format!("{:.4}", v))
+                .unwrap_or_else(|| "n/a".to_string())
+        ),
+    })
 }
 
 fn read_f64_param(params: &Value, key: &str) -> Option<f64> {

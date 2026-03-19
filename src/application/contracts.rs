@@ -396,7 +396,7 @@ impl BuiltinContracts {
                     ActionContract {
                         name: "topic_stats",
                         description:
-                            "Collect topic frequency, bandwidth, and delay metrics via projection stats collector.",
+                            "Collect runtime-first topic frequency/bandwidth/delay metrics with collector fallback.",
                         params: vec![
                             param("topic", ParamType::String, true, "ROS 2 topic name."),
                             param(
@@ -416,7 +416,7 @@ impl BuiltinContracts {
                     ActionContract {
                         name: "stream_pull",
                         description:
-                            "Pull projected stream messages from session-local topic buffer for sustained forwarding.",
+                            "Pull delay-aligned stream messages from session-local topic buffer (accepts source or projected topic).",
                         params: vec![
                             param(
                                 "session_id",

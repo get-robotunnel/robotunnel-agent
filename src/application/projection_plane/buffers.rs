@@ -7,6 +7,8 @@ pub struct StreamMessage {
     pub topic: String,
     pub topic_type: Option<String>,
     pub captured_at_unix: u64,
+    pub captured_at_unix_ms: u64,
+    pub display_at_unix_ms: u64,
     pub input_bytes: u64,
     pub output_bytes: u64,
     pub input_points: Option<u64>,
@@ -55,6 +57,15 @@ impl TopicStreamBuffer {
             .iter()
             .filter(|msg| msg.seq > since)
             .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    pub fn pull_since(&self, since_seq: Option<u64>) -> Vec<StreamMessage> {
+        let since = since_seq.unwrap_or(0);
+        self.messages
+            .iter()
+            .filter(|msg| msg.seq > since)
             .cloned()
             .collect()
     }
@@ -114,6 +125,19 @@ impl SessionLocalBuffer {
         let entry = self.topics.get(topic)?;
         Some(entry.pull(since_seq, limit))
     }
+
+    pub fn pull_messages_since(
+        &self,
+        topic: &str,
+        since_seq: Option<u64>,
+    ) -> Option<Vec<StreamMessage>> {
+        let topic = topic.trim();
+        if topic.is_empty() {
+            return None;
+        }
+        let entry = self.topics.get(topic)?;
+        Some(entry.pull_since(since_seq))
+    }
 }
 
 #[cfg(test)]
@@ -129,6 +153,8 @@ mod tests {
                 topic: "/scan".to_string(),
                 topic_type: None,
                 captured_at_unix: i,
+                captured_at_unix_ms: i * 1000,
+                display_at_unix_ms: i * 1000,
                 input_bytes: 10,
                 output_bytes: 5,
                 input_points: None,
@@ -157,6 +183,8 @@ mod tests {
                 topic: "/image".to_string(),
                 topic_type: None,
                 captured_at_unix: 1,
+                captured_at_unix_ms: 1000,
+                display_at_unix_ms: 1100,
                 input_bytes: 100,
                 output_bytes: 30,
                 input_points: None,
@@ -176,6 +204,8 @@ mod tests {
                 topic: "/image".to_string(),
                 topic_type: None,
                 captured_at_unix: 2,
+                captured_at_unix_ms: 2000,
+                display_at_unix_ms: 2100,
                 input_bytes: 100,
                 output_bytes: 30,
                 input_points: None,
