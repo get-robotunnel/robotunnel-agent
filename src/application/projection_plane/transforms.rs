@@ -540,7 +540,6 @@ fn classify_filter_support(
             unsupported.push(format!("encode={}", encode));
         }
     }
-
     (applied, unsupported)
 }
 
@@ -807,6 +806,23 @@ mod tests {
         assert!(launch.command.contains("--image-scale"));
         assert!(launch.supported.point_stride);
         assert!(launch.supported.image_scale);
+    }
+
+    #[test]
+    fn build_projection_launch_keeps_delay_only_passthrough_on_relay_path() {
+        let filters = ProjectionFilters::default();
+        let launch = build_projection_launch(
+            "/scan",
+            "/rt/debug/s1/scan",
+            Some("sensor_msgs/msg/LaserScan"),
+            &filters,
+            &TopicPolicyRule {
+                transform: "passthrough".to_string(),
+                ..TopicPolicyRule::default()
+            },
+            Some(std::path::Path::new("/tmp/worker.py")),
+        );
+        assert!(launch.command.contains("topic_tools relay"));
     }
 
     #[test]

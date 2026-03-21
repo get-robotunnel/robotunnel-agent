@@ -358,7 +358,9 @@ impl ProjectionEngine {
             "session_id": session_id,
             "topic": source_topic.clone(),
             "requested_topic": requested_topic,
+            "display_topic": source_topic.clone(),
             "source_topic": source_topic,
+            "transport_topic": projected_topic.clone(),
             "projected_topic": projected_topic,
             "since_seq": since_seq,
             "next_since_seq": next_since_seq,
@@ -821,7 +823,8 @@ fn build_runtime_combined_view(session: &ProjectionSession) -> serde_json::Value
             serde_json::json!({
                 "topic": stat.topic,
                 "source_topic": stat.topic,
-                "display_topic": projected_topic.clone().unwrap_or_else(|| stat.topic.clone()),
+                "display_topic": stat.topic,
+                "transport_topic": projected_topic.clone(),
                 "projected_topic": projected_topic,
                 "status": stat.status,
                 "last_success_age": stat.last_success_age,
@@ -1280,7 +1283,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_combined_view_prefers_projected_display_topic() {
+    fn runtime_combined_view_prefers_source_display_topic_and_transport_alias() {
         let mut session = ProjectionSession {
             session_id: "s1".to_string(),
             session_name: None,
@@ -1330,7 +1333,7 @@ mod tests {
                 .get("display_topic")
                 .and_then(|v| v.as_str())
                 .unwrap_or(""),
-            "/rt/debug/s1/scan"
+            "/scan"
         );
         assert_eq!(
             first
@@ -1338,6 +1341,13 @@ mod tests {
                 .and_then(|v| v.as_str())
                 .unwrap_or(""),
             "/scan"
+        );
+        assert_eq!(
+            first
+                .get("transport_topic")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            "/rt/debug/s1/scan"
         );
     }
 }

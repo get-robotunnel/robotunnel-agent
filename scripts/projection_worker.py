@@ -9,7 +9,8 @@ import struct
 import subprocess
 import sys
 import time
-from typing import List, Optional, Tuple
+from collections import deque
+from typing import Deque, List, Optional, Tuple
 
 import rclpy
 from rclpy.node import Node
@@ -27,6 +28,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-topic", required=True)
     parser.add_argument("--projected-topic", required=True)
     parser.add_argument("--hz-limit", type=float, default=0.0)
+    parser.add_argument("--desired-delay-ms", type=int, default=0)
+    parser.add_argument("--tf-alignment-window-ms", type=int, default=0)
     parser.add_argument("--point-stride", type=int, default=1)
     parser.add_argument("--voxel-leaf-m", type=float, default=0.0)
     parser.add_argument("--image-scale", type=float, default=1.0)
@@ -80,6 +83,8 @@ class ProjectionWorker(Node):
         self.source_topic = args.source_topic
         self.projected_topic = args.projected_topic
         self.hz_limit = max(0.0, float(args.hz_limit))
+        self.desired_delay_ms = max(0, int(args.desired_delay_ms))
+        self.tf_alignment_window_ms = max(0, int(args.tf_alignment_window_ms))
         self.point_stride = max(1, int(args.point_stride))
         self.voxel_leaf_m = max(0.0, float(args.voxel_leaf_m))
         self.image_scale = min(1.0, max(0.05, float(args.image_scale)))
@@ -87,6 +92,8 @@ class ProjectionWorker(Node):
         self.quality = max(1, min(100, int(args.quality)))
         self.min_publish_gap = (1.0 / self.hz_limit) if self.hz_limit > 0.0 else 0.0
         self.last_publish_mono = 0.0
+        self.pending_messages: Deque[Tuple[int, int, object]] = deque()
+        self.max_pending_messages = 256
 
         self.topic_type = read_topic_type(self.source_topic)
         self.msg_cls = get_message(self.topic_type)
@@ -107,15 +114,18 @@ class ProjectionWorker(Node):
             self.publisher = self.create_publisher(self.msg_cls, self.projected_topic, 10)
             self.output_topic_type = self.topic_type
         self.subscription = self.create_subscription(self.msg_cls, self.source_topic, self._on_msg, 10)
+        self.flush_timer = self.create_timer(0.02, self._flush_pending)
 
         self.get_logger().info(
-            "projection worker started: type=%s output=%s source=%s projected=%s hz=%.3f stride=%d voxel=%.3f scale=%.3f encode=%s quality=%d"
+            "projection worker started: type=%s output=%s source=%s projected=%s hz=%.3f delay_ms=%d tf_window_ms=%d stride=%d voxel=%.3f scale=%.3f encode=%s quality=%d"
             % (
                 self.topic_type,
                 self.output_topic_type,
                 self.source_topic,
                 self.projected_topic,
                 self.hz_limit,
+                self.desired_delay_ms,
+                self.tf_alignment_window_ms,
                 self.point_stride,
                 self.voxel_leaf_m,
                 self.image_scale,
@@ -160,7 +170,54 @@ class ProjectionWorker(Node):
             self.get_logger().warn(f"transform failed, publishing original message: {exc}")
             out = msg
 
-        self.publisher.publish(out)
+        self._enqueue_or_publish(out)
+
+    def _enqueue_or_publish(self, msg) -> None:
+        if self.desired_delay_ms <= 0:
+            self.publisher.publish(msg)
+            return
+
+        now_ms = int(time.monotonic() * 1000.0)
+        publish_at_ms = now_ms + self.desired_delay_ms
+        self.pending_messages.append((publish_at_ms, now_ms, msg))
+        while len(self.pending_messages) > self.max_pending_messages:
+            self.pending_messages.popleft()
+        self._flush_pending()
+
+    def _flush_pending(self) -> None:
+        if not self.pending_messages:
+            return
+
+        now_ms = int(time.monotonic() * 1000.0)
+        due = []
+        while self.pending_messages and self.pending_messages[0][0] <= now_ms:
+            due.append(self.pending_messages.popleft())
+        if not due:
+            return
+
+        publish_at_ms, captured_at_ms, msg = self._select_aligned_due(due, now_ms)
+        del publish_at_ms, captured_at_ms
+        self.publisher.publish(msg)
+
+    def _select_aligned_due(self, due, now_ms: int):
+        if len(due) == 1:
+            return due[0]
+
+        target_capture_ms = now_ms - self.desired_delay_ms
+        if self.tf_alignment_window_ms > 0:
+            earliest_capture_ms = target_capture_ms - self.tf_alignment_window_ms
+            aligned = [
+                item
+                for item in due
+                if earliest_capture_ms <= item[1] <= target_capture_ms
+            ]
+            if aligned:
+                return aligned[-1]
+
+        ready = [item for item in due if item[1] <= target_capture_ms]
+        if ready:
+            return ready[-1]
+        return due[-1]
 
     def _transform_point_cloud(self, msg: PointCloud2) -> PointCloud2:
         if self.point_stride <= 1 and self.voxel_leaf_m <= 0.0:

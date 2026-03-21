@@ -220,18 +220,17 @@ async fn handle_topic_stats(req: CommandRequest, engine: Arc<ProjectionEngine>) 
         .map(|view| build_runtime_projection_payload(view, window_sec));
 
     if let Some(view) = runtime_view.as_ref() {
-        if view.estimated.sample_count > 0 {
-            return ok(
-                req.id,
-                json!({
-                    "source": "projection_runtime_sampler",
-                    "runtime_primary": true,
-                    "collector_sparse": view.estimated.collector_sparse_hint,
-                    "runtime_projection": runtime_payload,
-                    "stats": build_runtime_stats_view(view, window_sec),
-                }),
-            );
-        }
+        return ok(
+            req.id,
+            json!({
+                "source": "projection_runtime_sampler",
+                "runtime_primary": true,
+                "collector_sparse": view.estimated.collector_sparse_hint,
+                "collector_skipped": true,
+                "runtime_projection": runtime_payload,
+                "stats": build_runtime_stats_view(view, window_sec),
+            }),
+        );
     }
 
     match collect_topic_stats(topic, window_sec).await {
@@ -341,7 +340,9 @@ fn build_runtime_projection_payload(view: &TopicRuntimeView, window_sec: u64) ->
         "source": "projection_runtime_sampler",
         "topic_resolution": {
             "requested_topic": view.requested_topic,
+            "display_topic": view.source_topic,
             "source_topic": view.source_topic,
+            "transport_topic": view.projected_topic,
             "projected_topic": view.projected_topic,
             "route_status": view.route_status,
         },
