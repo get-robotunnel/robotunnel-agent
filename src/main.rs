@@ -22,10 +22,19 @@ use tracing;
 use tracing_subscriber::{fmt, EnvFilter};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const APP_BUILD_DATE: &str = env!("ROBOTUNNEL_BUILD_DATE");
+const APP_GIT_COMMIT: &str = env!("ROBOTUNNEL_GIT_COMMIT");
+const APP_LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\nBuild Date: ",
+    env!("ROBOTUNNEL_BUILD_DATE"),
+    "\nGit Commit: ",
+    env!("ROBOTUNNEL_GIT_COMMIT")
+);
 
 #[derive(Parser, Debug)]
 #[command(name = "robotunnel-agent")]
-#[command(version = APP_VERSION)]
+#[command(version = APP_VERSION, long_version = APP_LONG_VERSION)]
 #[command(about = "RoboTunnel Agent — The Physical World API Layer")]
 struct Args {
     /// Path to config file
@@ -113,7 +122,12 @@ async fn main() -> anyhow::Result<()> {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.logging.level));
     fmt().with_env_filter(filter).with_target(false).init();
 
-    tracing::info!("robotunnel-agent v{} starting", APP_VERSION);
+    tracing::info!(
+        "robotunnel-agent v{} starting (build_date={}, git_commit={})",
+        APP_VERSION,
+        APP_BUILD_DATE,
+        APP_GIT_COMMIT
+    );
 
     // Shutdown signal
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

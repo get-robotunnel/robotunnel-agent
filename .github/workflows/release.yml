@@ -48,6 +48,20 @@ jobs:
             exit 1
           fi
 
+      - name: Compute release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
+          echo "git_commit=${GITHUB_SHA::7}" >> "${GITHUB_OUTPUT}"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -65,6 +79,9 @@ jobs:
 
       - name: Build release binary
         shell: bash
+        env:
+          ROBOTUNNEL_BUILD_DATE: ${{ steps.meta.outputs.build_date }}
+          ROBOTUNNEL_GIT_COMMIT: ${{ steps.meta.outputs.git_commit }}
         run: cargo build --locked --release --target "${{ matrix.target }}" --bin robotunnel-agent
 
       - name: Stage release artifact
