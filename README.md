@@ -2,9 +2,9 @@
 
 # RoboTunnel Agent
 
-**The Physical World API Layer**
+**Secure remote debug access for ROS 2 robots behind NAT**
 
-*Turn your robots and IoT devices into LLM-callable functions.*
+*Open-source robot-side agent for stable connectivity, native ROS tooling, and supportable field diagnostics.*
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Rust 1.75+](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org)
@@ -15,9 +15,29 @@
 
 ---
 
-RoboTunnel Agent is a lightweight, open-source Rust agent that runs on your robot. It maintains secure connectivity to the RoboTunnel Platform and executes robot-side skills for remote debugging, proactive fleet monitoring, and natural-language control. LLM API keys are stored **encrypted on the robot only** and never transmitted to any server.
+RoboTunnel Agent is a lightweight, open-source Rust agent that runs on your robot. In `v0.3.0`, its primary job is to keep ROS 2 robots reachable for remote debugging and basic diagnosis when the robot is remote, behind NAT, or sitting on a weak network where SSH is brittle. LLM API keys are stored **encrypted on the robot only** and never transmitted to any server.
 
-`v0.3.0` is currently in private beta. Invited users can use the hosted product free during the beta period. Invited beta users become Founding Developers and will receive a lifetime discount when paid plans launch. The pricing direction after beta is expected to focus on connection resources, while the agent remains open source.
+`v0.3.0` is currently in private beta. Invited users can use the hosted product free during the beta period. Invited beta users become Founding Developers and will receive a lifetime discount when paid plans launch. The current packaging direction after beta is active robots plus relay-heavy connection usage, while the agent remains open source.
+
+## What v0.3.0 Officially Means
+
+This first formal release has a narrow boundary. Inside that boundary, we aim to be dependable. Outside it, treat behavior as roadmap or best-effort beta.
+
+- **Current launch promise**: Secure remote debug access for ROS 2 robots behind NAT.
+- **Documented support matrix**: Ubuntu 20.04+ / Debian 11+ on the robot side, with ROS 2 Humble / Iron / Jazzy.
+- **Golden path**: Install with `scripts/install-agent.sh`, verify with `robotunnel list`, start a live session with `robotunnel connect` or `robotunnel debug ...`, then run your native ROS tools.
+- **Stable demo workflows**: Bring one robot online, hold a remote session, run first-line ROS diagnostics, and follow the documented support flow when WebRTC cannot establish cleanly.
+- **Explicit non-promises**: Self-hosted platform, non-Linux robot targets, generic IoT coverage, and fully mature fleet operations are not formal `v0.3.0` claims.
+
+## Who This Is For
+
+RoboTunnel `v0.3.0` is built for a sharp ICP, not for every edge device team:
+
+- Teams with real field robots, not just lab simulations
+- ROS 2 in the daily workflow
+- Robots behind NAT or on unstable remote networks
+- Frequent remote debugging and first-line diagnosis needs
+- Small teams without time to maintain their own VPN / bastion / WireGuard stack
 
 ## Architecture
 
@@ -53,18 +73,20 @@ RoboTunnel Agent is a lightweight, open-source Rust agent that runs on your robo
 
 ---
 
-## Why RoboTunnel Agent?
+## Why Start With Remote Debugging?
 
-The robot developer's daily reality: your robot is behind a NAT, SSH is fragile under WAN, and there's no good answer for "why is robot #3 acting weird?" from the field.
+The robot developer's daily reality is narrower and more painful than a big platform slogan suggests: your robot is behind NAT, the onsite link is unreliable, SSH drops at the worst moment, and your ROS tools stop being useful exactly when you need them most.
 
-RoboTunnel solves four scenarios that are broken in today's CLI-first world:
+RoboTunnel starts by making that path more trustworthy:
 
-| Scenario | Without RoboTunnel | With RoboTunnel |
+| Workflow | Without RoboTunnel | With RoboTunnel |
 |---|---|---|
-| **Remote Debug** | SSH → pray the connection holds | Persistent encrypted tunnel, ROS tools work natively |
-| **Fleet Monitoring** | Poll each robot manually, miss issues overnight | LLM proactively alerts you when anomalies are detected |
-| **Fleet Comparison** | Open 5 terminals, diff by hand | "Why is robot #3 different?" → natural language answer |
-| **Acceptance Testing** | Write test scripts, technical knowledge required | "Confirm all robots can complete a pick task" → pass/fail report |
+| **Bring a remote robot online** | VPN setup, port rules, manual bastions | One documented install path and hosted trust bootstrap |
+| **Hold a debug session** | SSH reconnect loops over weak WAN | Adaptive encrypted path with STUN first and fallback when needed |
+| **Use native ROS tools** | Custom wrappers or fragile ad hoc forwarding | `ros2` tools work against the remote robot over the held session |
+| **Escalate when links fail** | Guesswork and private support DMs | `webrtc-preflight.sh` plus phase-level connection logging |
+
+Monitoring, fleet operations, and agentic workflows remain the direction of travel, but they are not the primary promise of the first formal release.
 
 ---
 
@@ -113,7 +135,7 @@ RoboTunnel `v0.3.x` introduces cross-host tracing for the connection layer:
 
 ### Step 1 — Get your token
 
-RoboTunnel is currently in private beta. Email [russellshe@gmail.com](mailto:russellshe@gmail.com) to receive your `RT_KEY`. Mention what you're building — we prioritize robotics and IoT developers.
+RoboTunnel is currently in private beta. Email [russellshe@gmail.com](mailto:russellshe@gmail.com) to receive your `RT_KEY`. Mention what you're building — we currently prioritize teams with ROS 2 robots and real remote-debug needs.
 
 ### Step 2 — Install the CLI (your development machine)
 
@@ -212,6 +234,20 @@ export RT_WEBRTC_IPV6_ENABLED=true
 
 ---
 
+## Support Flow When A Robot Will Not Connect
+
+If the robot is not reachable, treat support as part of the product workflow:
+
+1. Verify presence and route hints with `robotunnel list`.
+2. Retry with `robotunnel connect <robot>` or the `robotunnel debug ...` path.
+3. Run `./scripts/webrtc-preflight.sh` to check the control-plane pieces without restarting the agent.
+4. Inspect phase-level logs such as `SIGNAL_WS_CONNECT`, `OFFER_SENT`, `DATACHANNEL_OPEN`, or TCP fallback messages.
+5. If needed, send the preflight result plus the relevant phase logs when asking for help.
+
+This is what "supportable connectivity" means in `v0.3.0`: there is a documented next step when a connection fails.
+
+---
+
 ## Setting Up LLM Keys
 
 Run these commands on the machine where `robotunnel-agent` is installed, typically the robot itself or an SSH session into that robot. Keys are stored locally, encrypted. The agent calls the provider API directly — your platform subscription does not cover LLM costs; you pay your provider directly with your own key.
@@ -282,7 +318,9 @@ If the tag version and `Cargo.toml` version do not match, the workflow fails ear
 
 Detailed documentation for all skills can be found at [docs.robotunnel.io/skills](https://robotunnel.io/docs/skills.html).
 
-These four scenarios are provided by the platform. The generic low-level CLI entry point is always:
+For `v0.3.0`, treat remote debugging as the primary launch workflow. Monitoring, fleet comparison, and acceptance flows are available, but they are adjacent capabilities rather than the main release promise.
+
+These built-in workflows are provided by the platform. The generic low-level CLI entry point is always:
 
 ```bash
 robotunnel skill <robot-selector> <skill> <action> --params '{"...":"..."}'
@@ -407,7 +445,8 @@ RoboTunnel is currently in private beta.
 
 - Invited users are currently free during the beta period.
 - Invited beta users become `Founding Developers` and will receive a lifetime discount when paid plans launch.
-- Future pricing is expected to focus mainly on connection resources.
+- The current packaging direction is active robots plus relay-heavy connection usage.
+- Pricing is not expected to be seat-based and is not expected to bill per prompt or per message.
 - LLM inference is still bring-your-own-key.
 - The agent remains open source.
 
@@ -421,14 +460,14 @@ RoboTunnel is currently in private beta.
 |---|---|---|
 | v0.2.0 | ✅ Released | Ed25519 tunnel, host-debug skill baseline, Kimi AI, Go platform |
 | v0.2.3 | ✅ Released | WebRTC P2P, multi-LLM local keys, proactive monitoring, fleet compare, acceptance testing |
-| v0.3.0 | 🚧 Shipping soon | Trust Plane, end-to-end integration and validation, release binaries, CLI, Discord bot |
-| v0.4.x | 📋 Planned | Skill Platform — publish your robot's capabilities for others to discover and use |
+| v0.3.0 | 🚧 Shipping soon | Formal remote-debug launch scope, support flow, release binaries, hosted trust bootstrap, CLI debug workflows |
+| v0.4.x | 📋 Planned | Monitoring, fleet operations, and more agentic workflows built on the same connectivity layer |
 
 ---
 
 ## Contributing
 
-Issues and PRs welcome. This is the open-source component of RoboTunnel — robot-side only. The platform gateway is closed-source and hosted.
+Issues and PRs welcome. This repository is the robot-side open-source component of RoboTunnel. The hosted platform covers auth, routing, signaling, and operational control-plane functions and is not part of this repository. Self-hosting is not currently a formal `v0.3.0` promise.
 
 If you're building something interesting with robots, we want to hear about it: [russellshe@gmail.com](mailto:russellshe@gmail.com)
 

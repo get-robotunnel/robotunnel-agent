@@ -11,7 +11,7 @@ RT_KEY="rtk_replace_me"
 PLATFORM_BASE_URL="https://api.robotunnel.io"
 
 # Optional robot identity
-ROBOT_NAME="robot-lab-01"
+ROBOT_NAME=""
 ROBOT_ROLE=""
 ROBOT_AVATAR_URL=""
 

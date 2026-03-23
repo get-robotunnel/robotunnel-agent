@@ -18,11 +18,13 @@ jobs:
       matrix:
         include:
           - runner: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             asset_name: robotunnel-agent-linux-amd64
+            install_packages: musl-tools
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             asset_name: robotunnel-agent-linux-arm64
+            install_packages: ""
 
     steps:
       - name: Check out repository
@@ -51,6 +53,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install system packages
+        if: matrix.install_packages != ''
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ${{ matrix.install_packages }}
+
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
 
@@ -62,7 +71,13 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/robotunnel-agent" "dist/${{ matrix.asset_name }}"
+          install -m 0755 "target/${{ matrix.target }}/release/robotunnel-agent" "dist/${{ matrix.asset_name }}"
+
+      - name: Smoke test release artifact
+        shell: bash
+        run: |
+          file "dist/${{ matrix.asset_name }}"
+          "dist/${{ matrix.asset_name }}" --version
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
