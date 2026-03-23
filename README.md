@@ -139,17 +139,19 @@ RoboTunnel is currently in private beta. Email [russellshe@gmail.com](mailto:rus
 
 ### Step 2 — Install the CLI (your development machine)
 
-Download the pre-compiled binary from [Releases](https://github.com/RussellTNY/robotunnel/releases):
+Install the CLI from [downloads.robotunnel.io](https://downloads.robotunnel.io):
 
 ```bash
 # macOS (Apple Silicon)
-curl -L https://github.com/RussellTNY/robotunnel/releases/latest/download/robotunnel-darwin-arm64 -o robotunnel
-chmod +x robotunnel && sudo mv robotunnel /usr/local/bin/
+curl -fsSL https://downloads.robotunnel.io/install.sh -o install-robotunnel.sh
+bash install-robotunnel.sh
 
 # Linux (amd64)
-curl -L https://github.com/RussellTNY/robotunnel/releases/latest/download/robotunnel-linux-amd64 -o robotunnel
-chmod +x robotunnel && sudo mv robotunnel /usr/local/bin/
+curl -fsSL https://downloads.robotunnel.io/install.sh -o install-robotunnel.sh
+bash install-robotunnel.sh
 ```
+
+If you need a pinned version, use `VERSION=v0.3.0-alpha10 bash install-robotunnel.sh`.
 
 ### Step 3 — Install, register, and launch the agent (on your robot)
 
