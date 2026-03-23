@@ -1,5 +1,6 @@
 use super::engine::{ProjectionFilters, ProjectionMode};
 use super::policy::{TopicPolicyRule, TopicPolicySet};
+use rt_core::ros::{ros2_shell_command, wrap_ros_shell};
 use serde::{Deserialize, Serialize};
 use std::fs;
 #[cfg(unix)]
@@ -157,8 +158,9 @@ async fn spawn_projection_route(
     applied_filters: &mut Vec<String>,
     unsupported_filters: &mut Vec<String>,
 ) -> (TopicProjectionRoute, Option<TransformProcessHandle>) {
-    let mut cmd = Command::new("sh");
-    cmd.args(["-lc", command]);
+    let wrapped_command = wrap_ros_shell(command);
+    let mut cmd = Command::new("bash");
+    cmd.args(["-lc", &wrapped_command]);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
@@ -549,8 +551,9 @@ async fn read_topic_type(topic: &str) -> Option<String> {
         return None;
     }
 
-    let mut cmd = Command::new("ros2");
-    cmd.args(["topic", "type", topic]);
+    let ros2_command = ros2_shell_command(&["topic", "type", topic]);
+    let mut cmd = Command::new("bash");
+    cmd.args(["-lc", &ros2_command]);
     let output = timeout(Duration::from_secs(3), cmd.output())
         .await
         .ok()?

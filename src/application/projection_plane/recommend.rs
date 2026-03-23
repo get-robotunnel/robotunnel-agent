@@ -1,5 +1,6 @@
 use super::engine::{resolve_profile, ProjectionMode};
 use super::policy::TopicPolicyRule;
+use rt_core::ros::ros2_shell_command;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use tokio::process::Command;
@@ -201,8 +202,9 @@ async fn read_topic_type(topic: &str) -> Option<String> {
     if topic.is_empty() {
         return None;
     }
-    let mut cmd = Command::new("ros2");
-    cmd.args(["topic", "type", topic]);
+    let command = ros2_shell_command(&["topic", "type", topic]);
+    let mut cmd = Command::new("bash");
+    cmd.args(["-lc", &command]);
 
     let output = timeout(Duration::from_secs(4), cmd.output()).await.ok()?;
     let output = output.ok()?;

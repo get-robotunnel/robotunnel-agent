@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use rt_agent_dispatch::{ExecutionResult, Skill, SkillError};
+use rt_core::ros::{ros2_shell_command, wrap_ros_shell};
 use serde_json::{json, Value};
 use tokio::process::Command;
 use tokio::sync::broadcast;
@@ -204,14 +205,16 @@ async fn stream_endpoint(skill: &Ros2Skill, params: &Value) -> ExecutionResult {
 }
 
 async fn run_ros2(args: &[&str], timeout_sec: u64) -> Result<CmdOutput, SkillError> {
-    let mut cmd = Command::new("ros2");
-    cmd.args(args);
+    let command = ros2_shell_command(args);
+    let mut cmd = Command::new("bash");
+    cmd.args(["-lc", &command]);
     run_command(cmd, timeout_sec).await
 }
 
 async fn run_shell(script: &str, timeout_sec: u64) -> Result<CmdOutput, SkillError> {
-    let mut cmd = Command::new("sh");
-    cmd.args(["-lc", script]);
+    let wrapped = wrap_ros_shell(script);
+    let mut cmd = Command::new("bash");
+    cmd.args(["-lc", &wrapped]);
     run_command(cmd, timeout_sec).await
 }
 

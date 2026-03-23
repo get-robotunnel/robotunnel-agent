@@ -1,5 +1,6 @@
 use super::adapters::ProjectionEndpoints;
 use super::engine::ProjectionMode;
+use rt_core::ros::wrap_ros_shell;
 use serde::{Deserialize, Serialize};
 use std::fs;
 #[cfg(unix)]
@@ -195,8 +196,9 @@ async fn ensure_foxglove_service(endpoint: &str) -> EnsuredBridge {
         "exec ros2 run foxglove_bridge foxglove_bridge --ros-args -p port:={}",
         port
     );
-    let mut cmd = Command::new("sh");
-    cmd.args(["-lc", &command]);
+    let wrapped_command = wrap_ros_shell(&command);
+    let mut cmd = Command::new("bash");
+    cmd.args(["-lc", &wrapped_command]);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
@@ -337,7 +339,7 @@ async fn ensure_rviz_vnc_service(endpoint: &str) -> EnsuredBridge {
         };
     };
 
-    let mut cmd = Command::new("sh");
+    let mut cmd = Command::new("bash");
     cmd.args(["-lc", &command]);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());

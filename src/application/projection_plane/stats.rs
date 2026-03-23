@@ -1,3 +1,4 @@
+use rt_core::ros::wrap_ros_shell;
 use serde::Serialize;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
@@ -62,8 +63,9 @@ pub async fn collect_topic_stats(topic: &str, window_sec: u64) -> Result<TopicSt
 }
 
 async fn run_shell(script: &str, timeout_sec: u64) -> Result<String, String> {
-    let mut cmd = Command::new("sh");
-    cmd.args(["-lc", script]);
+    let wrapped = wrap_ros_shell(script);
+    let mut cmd = Command::new("bash");
+    cmd.args(["-lc", &wrapped]);
 
     let duration = Duration::from_secs(timeout_sec.clamp(2, 120));
     let output = timeout(duration, cmd.output())

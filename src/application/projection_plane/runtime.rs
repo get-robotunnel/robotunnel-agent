@@ -1,4 +1,5 @@
 use super::engine::ProjectionFilters;
+use rt_core::ros::ros2_shell_command;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
@@ -386,24 +387,27 @@ async fn run_topic_echo(
     transient_local: bool,
     timeout_sec: u64,
 ) -> Result<String, String> {
-    let mut cmd = Command::new("ros2");
-    cmd.arg("topic").arg("echo").arg(topic);
-
+    let mut args = vec!["topic", "echo", topic];
     if let Some(topic_type) = sanitize_topic_type(topic_type) {
-        cmd.arg(topic_type);
+        args.push(topic_type);
+    }
+    args.push("--once");
+    if transient_local {
+        args.push("--qos-durability");
+        args.push("transient_local");
     }
 
-    cmd.arg("--once");
-    if transient_local {
-        cmd.args(["--qos-durability", "transient_local"]);
-    }
+    let command = ros2_shell_command(&args);
+    let mut cmd = Command::new("bash");
+    cmd.args(["-lc", &command]);
 
     run_command(cmd, timeout_sec).await
 }
 
 async fn run_ros2_cmd(args: &[&str], timeout_sec: u64) -> Result<String, String> {
-    let mut cmd = Command::new("ros2");
-    cmd.args(args);
+    let command = ros2_shell_command(args);
+    let mut cmd = Command::new("bash");
+    cmd.args(["-lc", &command]);
     run_command(cmd, timeout_sec).await
 }
 
