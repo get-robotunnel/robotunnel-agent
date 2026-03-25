@@ -28,35 +28,38 @@ RoboTunnel takes a different path. The agent runs on the robot, keeps trust and 
 ## Architecture
 
 ```text
-Developer path (primary)
-CLI
-  - init / list / debug
-  - connect (expert path)
-  - skill calls
-    |
-    v
-RoboTunnel Platform
-  - auth / routing / signaling
-    |
-    v
-Robot-side Agent
-  - visual_debug -> Debug Projection
-  - ros2_observe / host_debug / monitor
-  - local LLM keys stay here
-    ^
-    |
-Foxglove / RViz / ROS CLI attach to the debug session
-
-Team path (secondary)
-Discord
-  - status / logs / alerts
-  - natural-language ops
-    |
-    v
-RoboTunnel Platform
-    |
-    v
-Robot-side Agent
+Developer                            Team
+           │                              │
+           │ CLI                          │ Discord
+           │ init/list/debug              │ status/logs/alerts
+           │ connect/skill                │ natural-language ops
+           │                              │
+           └──────────┬───────────────────┘
+                      │
+                      ▼
+           ┌─────────────────────┐
+           │  RoboTunnel Platform│
+           │  auth · routing     │
+           │  signaling · relay  │
+           └──────────┬──────────┘
+                      │
+              Ed25519 + WebRTC/TCP
+                      │
+                      ▼
+           ┌─────────────────────┐
+           │   Robot-side Agent  │
+           │                     │
+           │  visual_debug       │  ◄──     Debug Projection
+           │  ros2_observe       │          (bandwidth-adaptive)
+           │  host_debug         │
+           │  monitor            │
+           │                     │
+           │  LLM keys local     │
+           └─────────────────────┘
+                      │
+           (CLI debug session only)
+                      │
+           Foxglove · RViz · ROS CLI
 ```
 
 ## Quick Start
@@ -110,14 +113,14 @@ Example output:
 
 ```text
 $ robotunnel list
-ROBOT ID       NAME                              STATUS      CONNECTION   LAST SEEN
-21e56bda...    jodie-Parallels-Virtual-Platform  Online      tcp         Just now
+ROBOT ID       NAME                      STATUS      CONNECTION   LAST SEEN
+21e56bda...    Robot-Lab-01              🟢 Online      tcp         Just now
 
-$ robotunnel debug start 21e56bda-f007-4e20-a487-db75d6277e0b --mode foxglove
+$ robotunnel debug start Robot-Lab-01 --mode foxglove
 Started debug session
   Session ID: dbg_7f3f1d6f
   Mode: foxglove
-  Endpoint: available via `robotunnel debug open 21e56bda-f007-4e20-a487-db75d6277e0b --launch`
+  Endpoint: available via `robotunnel debug open Robot-Lab-01 --launch`
 ```
 
 ## Debug Projection

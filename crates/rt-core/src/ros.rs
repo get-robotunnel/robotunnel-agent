@@ -9,7 +9,12 @@ pub fn ros_setup_script_path() -> Option<PathBuf> {
         env::var("ROS_SETUP").ok(),
         env::var("AMENT_PREFIX_PATH")
             .ok()
-            .and_then(|value| value.split(':').find(|part| !part.trim().is_empty()).map(str::to_string))
+            .and_then(|value| {
+                value
+                    .split(':')
+                    .find(|part| !part.trim().is_empty())
+                    .map(str::to_string)
+            })
             .map(|prefix| format!("{}/setup.bash", prefix.trim_end_matches('/'))),
     ]
     .into_iter()

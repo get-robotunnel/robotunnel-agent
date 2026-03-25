@@ -19,7 +19,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{sleep, timeout, Duration, Instant};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 use webrtc::data_channel::RTCDataChannel;
 
@@ -521,16 +521,51 @@ pub fn start_control_plane_bridge_if_enabled(
             let (relay_closed_tx, mut relay_closed_rx) = mpsc::channel::<String>(128);
             let mut relays: HashMap<String, RelaySession> = HashMap::new();
             let mut ping_tick = tokio::time::interval(Duration::from_secs(30));
+            let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(20));
             let mut watchdog_tick = tokio::time::interval(Duration::from_secs(10));
             let mut last_inbound = Instant::now();
             let inbound_timeout = Duration::from_secs(75);
+            let control_write_timeout = Duration::from_secs(8);
 
             loop {
                 tokio::select! {
                     _ = ping_tick.tick() => {
-                        if let Err(err) = write.send(Message::Ping(Vec::new().into())).await {
-                            tracing::warn!("[control] ping failed: robot={} err={}", robot_id, err);
-                            break;
+                        match timeout(control_write_timeout, write.send(Message::Ping(Vec::new().into()))).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => {
+                                tracing::warn!("[control] ping failed: robot={} err={}", robot_id, err);
+                                break;
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    "[control] ping write timeout: robot={} timeout={}s",
+                                    robot_id,
+                                    control_write_timeout.as_secs()
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    _ = heartbeat_tick.tick() => {
+                        // Some middleboxes are aggressive on control-frame-only websocket traffic.
+                        // Emit a lightweight text heartbeat to keep the path active.
+                        match timeout(
+                            control_write_timeout,
+                            write.send(Message::Text("{\"type\":\"control_heartbeat\"}".into())),
+                        ).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => {
+                                tracing::warn!("[control] heartbeat write failed: robot={} err={}", robot_id, err);
+                                break;
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    "[control] heartbeat write timeout: robot={} timeout={}s",
+                                    robot_id,
+                                    control_write_timeout.as_secs()
+                                );
+                                break;
+                            }
                         }
                     }
                     _ = watchdog_tick.tick() => {
@@ -544,9 +579,20 @@ pub fn start_control_plane_bridge_if_enabled(
                         }
                     }
                     Some(outbound) = outbound_rx.recv() => {
-                        if let Err(err) = write.send(Message::Text(outbound.into())).await {
-                            tracing::warn!("[control] outbound write failed: robot={} err={}", robot_id, err);
-                            break;
+                        match timeout(control_write_timeout, write.send(Message::Text(outbound.into()))).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => {
+                                tracing::warn!("[control] outbound write failed: robot={} err={}", robot_id, err);
+                                break;
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    "[control] outbound write timeout: robot={} timeout={}s",
+                                    robot_id,
+                                    control_write_timeout.as_secs()
+                                );
+                                break;
+                            }
                         }
                     }
                     Some(relay_id) = relay_closed_rx.recv() => {
@@ -925,8 +971,26 @@ async fn open_local_relay(
                         None,
                         None,
                     );
-                    if outbound_reader.send(outbound).await.is_err() {
-                        break;
+                    match timeout(Duration::from_millis(500), outbound_reader.send(outbound)).await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => {
+                            break;
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "[control] relay outbound backpressure relay={} dropping stream",
+                                relay_id_reader
+                            );
+                            let _ = outbound_reader.try_send(relay_control_message(
+                                "relay_close",
+                                &relay_id_reader,
+                                None,
+                                None,
+                                Some("relay outbound backpressure"),
+                            ));
+                            break;
+                        }
                     }
                 }
                 Err(err) => {

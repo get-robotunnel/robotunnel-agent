@@ -640,11 +640,20 @@ fn sanitize_topic(topic: &str) -> String {
         .filter(|seg| !seg.is_empty())
         .collect::<Vec<_>>()
         .join("_");
-    if collapsed.is_empty() {
+    let mut token = if collapsed.is_empty() {
         "topic".to_string()
     } else {
         collapsed
+    };
+    if token
+        .chars()
+        .next()
+        .map(|ch| ch.is_ascii_digit())
+        .unwrap_or(false)
+    {
+        token.insert(0, 't');
     }
+    token
 }
 
 fn session_namespace(session_id: &str) -> String {
@@ -660,7 +669,16 @@ fn session_namespace(session_id: &str) -> String {
     if compact.is_empty() {
         return "session".to_string();
     }
-    compact.chars().take(10).collect()
+    let mut namespace: String = compact.chars().take(10).collect();
+    if namespace
+        .chars()
+        .next()
+        .map(|ch| ch.is_ascii_digit())
+        .unwrap_or(false)
+    {
+        namespace.replace_range(0..1, "s");
+    }
+    namespace
 }
 
 fn shell_quote(value: &str) -> String {
@@ -683,6 +701,16 @@ mod tests {
     fn build_projected_topic_uses_session_namespace() {
         let topic = build_projected_topic("abc123", "/lidar/points");
         assert_eq!(topic, "/rt/debug/abc123/lidar_points");
+    }
+
+    #[test]
+    fn sanitize_topic_prefixes_numeric_token() {
+        assert_eq!(sanitize_topic("/3d/camera"), "t3d_camera");
+    }
+
+    #[test]
+    fn session_namespace_never_starts_with_digit() {
+        assert_eq!(session_namespace("20afd273-a3cb-45ff"), "s0afd273a3");
     }
 
     #[test]
