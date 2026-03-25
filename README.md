@@ -28,39 +28,35 @@ RoboTunnel takes a different path. The agent runs on the robot, keeps trust and 
 ## Architecture
 
 ```text
-┌────────────────────────────────────────────────────────────────┐
-│                        Human Interfaces                        │
-│                                                                │
-│  Developer CLI                                 Discord Bot     │
-│  - init / list / debug                         - status        │
-│  - connect (expert path)                       - logs          │
-│  - skill calls                                 - alerts        │
-└───────────────────────────────┬────────────────────────────────┘
-                                │
-                                ▼
-                     ┌────────────────────────┐
-                     │   RoboTunnel Platform  │
-                     │   auth · routing       │
-                     │   signaling · relay    │
-                     └────────────┬───────────┘
-                                  │
-                     Ed25519-authenticated transport
-                  WebRTC when possible, TCP when needed
-                                  │
-                                  ▼
-                  ┌──────────────────────────────────┐
-                  │         Robot-side Agent         │
-                  │                                  │
-                  │  visual_debug  -> Debug Projection
-                  │  ros2_observe  -> topic inspection
-                  │  host_debug    -> host diagnosis
-                  │  monitor       -> health signals
-                  │                                  │
-                  │  Local LLM keys stay here        │
-                  └──────────────────────────────────┘
-                                  │
-                                  ▼
-                       Foxglove · RViz · ROS CLI
+Developer path (primary)
+CLI
+  - init / list / debug
+  - connect (expert path)
+  - skill calls
+    |
+    v
+RoboTunnel Platform
+  - auth / routing / signaling
+    |
+    v
+Robot-side Agent
+  - visual_debug -> Debug Projection
+  - ros2_observe / host_debug / monitor
+  - local LLM keys stay here
+    ^
+    |
+Foxglove / RViz / ROS CLI attach to the debug session
+
+Team path (secondary)
+Discord
+  - status / logs / alerts
+  - natural-language ops
+    |
+    v
+RoboTunnel Platform
+    |
+    v
+Robot-side Agent
 ```
 
 ## Quick Start
@@ -95,6 +91,8 @@ chmod +x install-agent.sh
 
 ### Step 3. Start a managed debug session
 
+For `--mode foxglove`, `--launch` opens the Foxglove endpoint for you. If you prefer to attach manually, or you are using a machine without a browser session, run the same command without `--launch`.
+
 ```bash
 # Verify the robot is online
 robotunnel list
@@ -107,6 +105,20 @@ robotunnel debug open <robot> --launch
 ```
 
 At this point your local tools can work against the remote session. `robotunnel connect <robot>` still exists, but it is the expert low-level tunnel path, not the default onboarding flow.
+
+Example output:
+
+```text
+$ robotunnel list
+ROBOT ID       NAME                              STATUS      CONNECTION   LAST SEEN
+21e56bda...    jodie-Parallels-Virtual-Platform  Online      tcp         Just now
+
+$ robotunnel debug start 21e56bda-f007-4e20-a487-db75d6277e0b --mode foxglove
+Started debug session
+  Session ID: dbg_7f3f1d6f
+  Mode: foxglove
+  Endpoint: available via `robotunnel debug open 21e56bda-f007-4e20-a487-db75d6277e0b --launch`
+```
 
 ## Debug Projection
 
@@ -258,15 +270,18 @@ Trust is a product feature, not a footer note.
 - Robot OS: Ubuntu 20.04+ / Debian 11+
 - ROS 2: Humble / Iron / Jazzy
 - Primary promise: ROS 2 remote debugging for robots behind NAT
+- Supported onboarding path: hosted RoboTunnel platform
 - Expert path still supported: `robotunnel connect`
-- Not the current promise: self-hosting, generic IoT coverage, or mature fleet operations
+- Advanced option exists: `PLATFORM_BASE_URL` can be overridden for internal or experimental setups
+- Not the current promise: self-hosted platform support, generic IoT coverage, or mature fleet operations
 
 If you want the deeper installation, support-flow, or reference docs, use the public docs at [robotunnel.io/docs](https://robotunnel.io/docs/).
 
 ## Roadmap
 
-Near-term work follows the same line:
-
-1. Harder, more observable Debug Projection sessions for real field links.
-2. Better team workflows through Discord, alerts, and shared operational context.
-3. Stronger fleet-level diagnostics after the robot-level debug path is truly dependable.
+| Version | Focus |
+|---|---|
+| `v0.3.0` | Remote debugging that actually works for ROS 2 robots behind NAT |
+| `v0.4.x` | Harder Debug Projection sessions, stronger observability, better session quality on weak links |
+| `v0.5.x` | Better team workflows through Discord, alerts, and shared operational context |
+| `Later` | Fleet-level diagnostics and broader operational workflows after the robot-level debug path is dependable |
