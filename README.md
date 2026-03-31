@@ -28,13 +28,13 @@ RoboTunnel takes a different path. The agent runs on the robot, keeps trust and 
 ## Architecture
 
 ```text
-Developer                            Team
-           │                              │
-           │ CLI                          │ Discord
-           │ init/list/debug              │ status/logs/alerts
-           │ connect/skill                │ natural-language ops
-           │                              │
-           └──────────┬───────────────────┘
+Developer                               Team
+           │                                  │
+           │ CLI                              │ Discord
+           │ init/list/debug                  │ status/logs/alerts
+           │ connect/skill                    │ natural-language ops
+           │                                  │
+           └──────────┬───────────────────────┘
                       │
                       ▼
            ┌─────────────────────┐
@@ -46,16 +46,14 @@ Developer                            Team
               Ed25519 + WebRTC/TCP
                       │
                       ▼
-           ┌─────────────────────┐
-           │   Robot-side Agent  │
-           │                     │
-           │  visual_debug       │  ◄──     Debug Projection
-           │  ros2_observe       │          (bandwidth-adaptive)
-           │  host_debug         │
-           │  monitor            │
-           │                     │
-           │  LLM keys local     │
-           └─────────────────────┘
+           ┌──────────────────────────────────┐
+           │   Robot-side Agent               │
+           │                                  │
+           │  visual_debug    ros2_observe    │  ◄──     Debug Projection
+           │  host_debug      monitor         │          (bandwidth-adaptive)
+           │                                  │
+           │  LLM keys local                  │
+           └──────────────────────────────────┘
                       │
            (CLI debug session only)
                       │
