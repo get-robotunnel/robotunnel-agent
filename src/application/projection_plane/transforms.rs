@@ -1,6 +1,6 @@
 use super::engine::{ProjectionFilters, ProjectionMode};
 use super::policy::{TopicPolicyRule, TopicPolicySet};
-use rt_core::ros::{ros2_shell_command, wrap_ros_shell};
+use rt_core::ros::{ros2_shell_command, ros_setup_script_path, wrap_ros_shell};
 use serde::{Deserialize, Serialize};
 use std::fs;
 #[cfg(unix)]
@@ -279,13 +279,12 @@ fn build_projection_launch(
     policy_rule: &TopicPolicyRule,
     worker_script: Option<&Path>,
 ) -> ProjectionLaunch {
-    let source = shell_quote(source_topic);
-    let projected = shell_quote(projected_topic);
     let transform = policy_rule.transform.as_str();
 
     if matches!(topic_type, Some("tf2_msgs/msg/TFMessage")) {
+        let relay_args = vec![source_topic.to_string(), projected_topic.to_string()];
         return ProjectionLaunch {
-            command: format!("exec ros2 run topic_tools relay {} {}", source, projected),
+            command: build_topic_tools_command("relay", &relay_args),
             projected_topic_type: topic_type.map(ToString::to_string),
             supported: SupportedFilters::default(),
         };
@@ -326,11 +325,14 @@ fn build_projection_launch(
     }
 
     if let Some(hz) = filters.hz_limit.filter(|v| *v > 0.0) {
+        let throttle_args = vec![
+            "messages".to_string(),
+            source_topic.to_string(),
+            format!("{:.3}", hz),
+            projected_topic.to_string(),
+        ];
         return ProjectionLaunch {
-            command: format!(
-                "exec ros2 run topic_tools throttle messages {} {:.3} {}",
-                source, hz, projected
-            ),
+            command: build_topic_tools_command("throttle", &throttle_args),
             projected_topic_type: topic_type.map(ToString::to_string),
             supported: SupportedFilters {
                 hz_limit: true,
@@ -339,11 +341,57 @@ fn build_projection_launch(
         };
     }
 
+    let relay_args = vec![source_topic.to_string(), projected_topic.to_string()];
     ProjectionLaunch {
-        command: format!("exec ros2 run topic_tools relay {} {}", source, projected),
+        command: build_topic_tools_command("relay", &relay_args),
         projected_topic_type: topic_type.map(ToString::to_string),
         supported: SupportedFilters::default(),
     }
+}
+
+fn build_topic_tools_command(subcommand: &str, args: &[String]) -> String {
+    if let Some(exec_path) = resolve_topic_tools_executable(subcommand) {
+        let mut command = format!("exec {}", shell_quote(&exec_path));
+        for arg in args {
+            command.push(' ');
+            command.push_str(&shell_quote(arg));
+        }
+        return command;
+    }
+
+    let mut ros_args: Vec<&str> = vec!["run", "topic_tools", subcommand];
+    ros_args.extend(args.iter().map(String::as_str));
+    ros2_shell_command(&ros_args)
+}
+
+fn resolve_topic_tools_executable(subcommand: &str) -> Option<String> {
+    const KNOWN_ROS_DISTROS: &[&str] = &["jazzy", "humble", "iron", "rolling", "galactic", "foxy"];
+
+    let subcommand = subcommand.trim();
+    if subcommand.is_empty() {
+        return None;
+    }
+
+    if let Some(setup) = ros_setup_script_path() {
+        if let Some(prefix) = setup.parent().and_then(|p| p.parent()) {
+            let candidate = prefix.join("lib").join("topic_tools").join(subcommand);
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    for distro in KNOWN_ROS_DISTROS {
+        let candidate = PathBuf::from(format!(
+            "/opt/ros/{}/lib/topic_tools/{}",
+            distro, subcommand
+        ));
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+
+    None
 }
 
 fn can_worker_process(topic_type: Option<&str>, transform: &str) -> bool {
@@ -697,6 +745,12 @@ fn unix_now() -> u64 {
 mod tests {
     use super::*;
 
+    fn command_invokes_topic_tools(command: &str, subcommand: &str) -> bool {
+        command.contains(&format!("topic_tools {}", subcommand))
+            || command.contains(&format!("topic_tools' '{}'", subcommand))
+            || command.contains(&format!("/topic_tools/{}", subcommand))
+    }
+
     #[test]
     fn build_projected_topic_uses_session_namespace() {
         let topic = build_projected_topic("abc123", "/lidar/points");
@@ -762,7 +816,8 @@ mod tests {
             },
             None,
         );
-        assert!(launch.command.contains("topic_tools throttle messages"));
+        assert!(command_invokes_topic_tools(&launch.command, "throttle"));
+        assert!(launch.command.contains("messages"));
         assert!(launch.supported.hz_limit);
     }
 
@@ -810,7 +865,8 @@ mod tests {
             },
             None,
         );
-        assert!(launch.command.contains("topic_tools throttle messages"));
+        assert!(command_invokes_topic_tools(&launch.command, "throttle"));
+        assert!(launch.command.contains("messages"));
         assert!(launch.supported.hz_limit);
     }
 
@@ -853,7 +909,7 @@ mod tests {
             },
             Some(std::path::Path::new("/tmp/worker.py")),
         );
-        assert!(launch.command.contains("topic_tools relay"));
+        assert!(command_invokes_topic_tools(&launch.command, "relay"));
     }
 
     #[test]

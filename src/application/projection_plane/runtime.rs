@@ -1,5 +1,4 @@
 use super::engine::ProjectionFilters;
-use rt_core::ros::ros2_shell_command;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
@@ -367,13 +366,22 @@ fn project_point_cloud_sample(
 }
 
 async fn read_topic_type(topic: &str) -> Result<String, String> {
-    if let Ok(raw) = run_ros2_cmd(&["topic", "type", topic], 4).await {
+    if let Ok(raw) = run_ros2_cmd(
+        &["topic", "type", "--no-daemon", "--spin-time", "1", topic],
+        5,
+    )
+    .await
+    {
         if let Some(v) = parse_topic_type_output(&raw) {
             return Ok(v);
         }
     }
 
-    let raw = run_ros2_cmd(&["topic", "list", "-t"], 4).await?;
+    let raw = run_ros2_cmd(
+        &["topic", "list", "-t", "--no-daemon", "--spin-time", "1"],
+        5,
+    )
+    .await?;
     if let Some(v) = parse_topic_type_from_list(&raw, topic) {
         return Ok(v);
     }
@@ -387,28 +395,66 @@ async fn run_topic_echo(
     transient_local: bool,
     timeout_sec: u64,
 ) -> Result<String, String> {
-    let mut args = vec!["topic", "echo", topic];
+    let timeout_arg = timeout_sec.clamp(2, 30).to_string();
+    let mut args = vec!["topic", "echo", "--no-daemon", "--spin-time", "1", topic];
     if let Some(topic_type) = sanitize_topic_type(topic_type) {
         args.push(topic_type);
     }
     args.push("--once");
+    args.push("--timeout");
+    args.push(timeout_arg.as_str());
     if transient_local {
         args.push("--qos-durability");
         args.push("transient_local");
     }
 
-    let command = ros2_shell_command(&args);
+    let command = build_ros2_shell_command(&args);
     let mut cmd = Command::new("bash");
     cmd.args(["-lc", &command]);
 
-    run_command(cmd, timeout_sec).await
+    run_command(cmd, timeout_sec.saturating_add(2)).await
 }
 
 async fn run_ros2_cmd(args: &[&str], timeout_sec: u64) -> Result<String, String> {
-    let command = ros2_shell_command(args);
+    let command = build_ros2_shell_command(args);
     let mut cmd = Command::new("bash");
     cmd.args(["-lc", &command]);
     run_command(cmd, timeout_sec).await
+}
+
+fn build_ros2_shell_command(args: &[&str]) -> String {
+    let joined = args
+        .iter()
+        .map(|arg| shell_escape(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    format!(
+        "if command -v ros2 >/dev/null 2>&1; then \
+ros2 {joined}; \
+elif [ -f /opt/ros/jazzy/setup.bash ]; then \
+source /opt/ros/jazzy/setup.bash >/dev/null 2>&1 && ros2 {joined}; \
+elif [ -x /opt/ros/jazzy/bin/ros2 ]; then \
+/opt/ros/jazzy/bin/ros2 {joined}; \
+elif [ -f /opt/ros/humble/setup.bash ]; then \
+source /opt/ros/humble/setup.bash >/dev/null 2>&1 && ros2 {joined}; \
+elif [ -x /opt/ros/humble/bin/ros2 ]; then \
+/opt/ros/humble/bin/ros2 {joined}; \
+else ros2 {joined}; fi"
+    )
+}
+
+fn shell_escape(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 async fn run_command(mut cmd: Command, timeout_sec: u64) -> Result<String, String> {

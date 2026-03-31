@@ -3089,13 +3089,12 @@ dependencies = [
 [[package]]
 name = "webrtc-ice"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0348b28b593f7709ac98d872beb58c0009523df652c78e01b950ab9c537ff17d"
 dependencies = [
  "arc-swap",
  "async-trait",
  "crc",
  "log",
+ "native-tls",
  "portable-atomic",
  "rand 0.8.5",
  "serde",
@@ -3103,6 +3102,7 @@ dependencies = [
  "stun",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-native-tls",
  "turn",
  "url",
  "uuid",

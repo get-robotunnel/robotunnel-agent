@@ -112,7 +112,7 @@ fn build_network_profile(local_ip: Option<&str>) -> Option<NetworkProfilePayload
             "public_tcp".to_string(),
             "stun_p2p".to_string(),
             "turn_relay".to_string(),
-            "vps_relay".to_string(),
+            "platform_relay".to_string(),
         ],
         network_tags,
     })

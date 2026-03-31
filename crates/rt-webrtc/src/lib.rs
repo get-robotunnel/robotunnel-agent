@@ -62,6 +62,8 @@ pub struct WebRtcConfig {
     pub stun_timeout_secs: u64,
     /// Optional trace ID to correlate logs across Agent/Platform/CLI
     pub bootstrap_id: Option<String>,
+    /// Optional route type hint from connect plan (for example: turn_relay)
+    pub route_type: Option<String>,
 }
 
 impl WebRtcConfig {
@@ -128,6 +130,7 @@ mod tests {
             api_key: "rob_test".to_string(),
             stun_timeout_secs: 8,
             bootstrap_id: None,
+            route_type: None,
         }
     }
 

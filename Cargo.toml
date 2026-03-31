@@ -42,3 +42,6 @@ base64 = "0.22"
 strip = true
 lto = true
 opt-level = "s"
+
+[patch.crates-io]
+webrtc-ice = { path = "vendor/webrtc-ice" }

@@ -1,9 +1,9 @@
 //! WebRTC client for the RoboTunnel Agent.
 //!
-//! Implements the three-phase connection strategy:
-//!   1. Try STUN-only ICE (timeout: `stun_timeout_secs`)
-//!   2. If STUN fails, fetch TURN credentials and retry
-//!   3. If both fail, signal TcpTunnel fallback to caller
+//! Implements a single-pass ICE strategy:
+//!   1. Fetch TURN credentials (best effort)
+//!   2. Build one ICE config with STUN + TURN candidates
+//!   3. Run one parallel ICE attempt within a bounded timeout window
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,11 +27,14 @@ use webrtc::{
     ice::network_type::NetworkType,
     ice_transport::{
         ice_candidate::{RTCIceCandidate, RTCIceCandidateInit},
+        ice_candidate_pair::RTCIceCandidatePair,
+        ice_connection_state::RTCIceConnectionState,
         ice_server::RTCIceServer,
     },
     interceptor::registry::Registry,
     peer_connection::{
         configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState,
+        policy::ice_transport_policy::RTCIceTransportPolicy,
         sdp::session_description::RTCSessionDescription,
     },
 };
@@ -49,80 +52,123 @@ pub async fn connect(
     on_message: Arc<dyn Fn(Vec<u8>) + Send + Sync>,
 ) -> Result<(Arc<RTCDataChannel>, ConnectionType)> {
     let id = cfg.bootstrap_id.as_deref().unwrap_or("none");
-    // Phase 1: attempt STUN-only
-    info!("[BOOTSTRAP:{}] WebRTC: attempting STUN (direct P2P)...", id);
-    log_phase(cfg, BootstrapPhase::StunStart, None);
-    let stun_ice_servers = vec![RTCIceServer {
-        urls: vec!["stun:stun.l.google.com:19302".to_string()],
-        ..Default::default()
-    }];
-
-    match attempt_webrtc(cfg, stun_ice_servers, on_message.clone()).await {
-        Ok(dc) => {
-            log_stun_success();
-            return Ok((dc, ConnectionType::Stun));
-        }
-        Err(e) => {
-            log_phase(cfg, BootstrapPhase::StunTimeout, Some(&e.to_string()));
-            warn!(
-                "WebRTC bootstrap before direct STUN completion failed: {:#}. Fetching TURN credentials...",
-                e
-            );
-        }
-    }
-
-    // Phase 2: fetch TURN credentials and retry
-    let turn_creds = fetch_turn_credentials(cfg).await?;
-    if !turn_creds.turn_available {
-        bail!("TURN not available on platform — WebRTC cannot proceed");
-    }
-
-    let turn = turn_creds
-        .turn
-        .context("TURN credentials missing from response")?;
-    let filtered_turn_urls = filter_supported_turn_urls(&turn.urls);
-    for skipped in turn
-        .urls
-        .iter()
-        .filter(|url| !filtered_turn_urls.iter().any(|kept| kept == *url))
-    {
-        warn!(
-            "WebRTC: skipping unsupported TURN URL for current ICE stack: {}",
-            skipped
-        );
-    }
-    if filtered_turn_urls.is_empty() {
-        bail!(
-            "TURN credentials available but no supported TURN URL (currently requires turn:... over UDP)"
-        );
-    }
-
-    let mut ice_servers = turn_creds
-        .stun_urls
-        .iter()
-        .map(|u| RTCIceServer {
-            urls: vec![u.clone()],
-            ..Default::default()
-        })
-        .collect::<Vec<_>>();
-
-    ice_servers.push(RTCIceServer {
-        urls: filtered_turn_urls.clone(),
-        username: turn.username.clone(),
-        credential: turn.credential.clone(),
-        ..Default::default()
-    });
-
+    let relay_required = route_requires_relay(cfg);
     info!(
-        "WebRTC: retrying with TURN relay ({})...",
-        filtered_turn_urls.join(", ")
+        "[BOOTSTRAP:{}] WebRTC: preparing parallel ICE (STUN+TURN)...",
+        id
     );
+    if relay_required {
+        info!(
+            "[BOOTSTRAP:{}] route_type=turn_relay -> enforcing relay-only ICE policy",
+            id
+        );
+    }
+    log_phase(cfg, BootstrapPhase::StunStart, None);
+
+    let mut ice_servers = Vec::new();
+    if !relay_required {
+        ice_servers.push(RTCIceServer {
+            urls: vec!["stun:stun.l.google.com:19302".to_string()],
+            ..Default::default()
+        });
+    }
+    let mut turn_enabled = false;
+
+    match fetch_turn_credentials(cfg).await {
+        Ok(turn_creds) => {
+            if !relay_required {
+                for stun_url in &turn_creds.stun_urls {
+                    ice_servers.push(RTCIceServer {
+                        urls: vec![stun_url.clone()],
+                        ..Default::default()
+                    });
+                }
+            }
+
+            if turn_creds.turn_available {
+                if let Some(turn) = turn_creds.turn {
+                    let filtered_turn_urls = filter_supported_turn_urls(&turn.urls);
+                    let tcp_enabled = env_flag_enabled_with_default("RT_WEBRTC_TCP_ENABLED", false);
+                    for raw in &turn.urls {
+                        if is_supported_turn_url(raw, tcp_enabled) {
+                            continue;
+                        }
+                        match turn_url_transport(raw) {
+                            Some(TurnUrlTransport::Tcp) => warn!(
+                                "WebRTC: dropping TCP TURN URL because RT_WEBRTC_TCP_ENABLED=false: {}",
+                                raw
+                            ),
+                            _ => warn!(
+                                "WebRTC: skipping unsupported TURN URL for current ICE stack: {}",
+                                raw
+                            ),
+                        }
+                    }
+                    if !filtered_turn_urls.is_empty() {
+                        info!(
+                            "WebRTC: TURN relay candidates enabled ({})",
+                            filtered_turn_urls.join(", ")
+                        );
+                        ice_servers.push(RTCIceServer {
+                            urls: filtered_turn_urls,
+                            username: turn.username,
+                            credential: turn.credential,
+                            ..Default::default()
+                        });
+                        turn_enabled = true;
+                    } else {
+                        if relay_required {
+                            bail!("relay-only mode requested but no supported TURN URL remained");
+                        } else {
+                            warn!(
+                                "WebRTC: TURN credentials fetched but no supported TURN URL remained; continuing with STUN only"
+                            );
+                        }
+                    }
+                } else {
+                    if relay_required {
+                        bail!("relay-only mode requested but TURN credentials missing");
+                    } else {
+                        warn!(
+                            "WebRTC: TURN marked available but credentials missing; continuing with STUN only"
+                        );
+                    }
+                }
+            } else {
+                if relay_required {
+                    bail!("relay-only mode requested but TURN not available");
+                } else {
+                    warn!("WebRTC: TURN not available from platform; continuing with STUN only");
+                }
+            }
+        }
+        Err(err) => {
+            if relay_required {
+                return Err(err)
+                    .context("relay-only mode requested but TURN credential fetch failed");
+            } else {
+                warn!(
+                    "WebRTC: failed to fetch TURN credentials ({:#}); continuing with STUN only",
+                    err
+                );
+            }
+        }
+    }
+
     let dc = attempt_webrtc(cfg, ice_servers, on_message)
         .await
-        .context("WebRTC failed with both STUN and TURN")?;
+        .context("WebRTC failed during parallel ICE attempt")?;
 
-    info!("[BOOTSTRAP:{}] WebRTC: connected via TURN relay", id);
-    Ok((dc, ConnectionType::Turn))
+    if turn_enabled {
+        info!(
+            "[BOOTSTRAP:{}] WebRTC: connected (parallel ICE with TURN relay enabled)",
+            id
+        );
+        Ok((dc, ConnectionType::Turn))
+    } else {
+        log_stun_success();
+        Ok((dc, ConnectionType::Stun))
+    }
 }
 
 /// Inner connection attempt with a given set of ICE servers.
@@ -133,7 +179,7 @@ async fn attempt_webrtc(
 ) -> Result<Arc<RTCDataChannel>> {
     let cfg_clone = cfg.clone();
     // Build WebRTC API
-    let network_types = ice_network_types_from_env();
+    let network_types = ice_network_types_for_servers(&ice_servers);
     let mut setting_engine = SettingEngine::default();
     setting_engine.set_network_types(network_types.clone());
     // Avoid negotiating AEAD_AES_256_GCM with current stack versions.
@@ -158,26 +204,50 @@ async fn attempt_webrtc(
         .with_interceptor_registry(registry)
         .build();
 
-    let config = RTCConfiguration {
+    let mut config = RTCConfiguration {
         ice_servers,
         ..Default::default()
     };
+    if route_requires_relay(cfg) {
+        config.ice_transport_policy = RTCIceTransportPolicy::Relay;
+    }
 
     let pc = Arc::new(api.new_peer_connection(config).await?);
+
+    let (dc_open_tx, dc_open_rx) = tokio::sync::oneshot::channel::<()>();
+    let dc_open_tx = Arc::new(std::sync::Mutex::new(Some(dc_open_tx)));
 
     // DataChannel for bidirectional data transfer
     let dc = pc.create_data_channel("rt-data", None).await?;
     {
         let on_msg = on_message.clone();
+        let dc_open_tx = dc_open_tx.clone();
         dc.on_message(Box::new(move |msg| {
             on_msg(msg.data.to_vec());
             Box::pin(async {})
         }));
-        dc.on_open(Box::new(|| {
-            info!("WebRTC DataChannel opened");
-            Box::pin(async {})
+        dc.on_open(Box::new(move || {
+            let dc_open_tx = dc_open_tx.clone();
+            Box::pin(async move {
+                info!("WebRTC DataChannel opened");
+                if let Ok(mut guard) = dc_open_tx.lock() {
+                    if let Some(tx) = guard.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            })
         }));
     }
+
+    // Log selected ICE pair for protocol-level diagnosis (stun vs turn/udp vs turn/tcp)
+    pc.sctp()
+        .transport()
+        .ice_transport()
+        .on_selected_candidate_pair_change(Box::new(|pair: RTCIceCandidatePair| {
+            Box::pin(async move {
+                info!("WebRTC selected candidate pair: {}", pair);
+            })
+        }));
 
     // Connect to signaling server
     let sig_url = cfg_clone.signaling_url();
@@ -249,19 +319,39 @@ async fn attempt_webrtc(
     log_phase(&cfg_clone, BootstrapPhase::OfferSent, None);
 
     // Wait for answer + ICE candidates (with timeout)
-    let connect_timeout = Duration::from_secs(cfg.stun_timeout_secs.max(10));
-    let (connected_tx, connected_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-    let connected_tx = std::sync::Mutex::new(Some(connected_tx));
+    let connect_timeout = resolve_parallel_connect_timeout(cfg);
+    let (connected_tx, connected_rx) =
+        tokio::sync::oneshot::channel::<std::result::Result<(), String>>();
+    let connected_tx = Arc::new(std::sync::Mutex::new(Some(connected_tx)));
 
     {
-        let ctx = Arc::new(connected_tx);
-        let cfg_clone2 = cfg_clone.clone();
+        let ctx = connected_tx.clone();
         pc.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
             let ctx = ctx.clone();
-            let cfg_phase = cfg_clone2.clone();
             Box::pin(async move {
                 match s {
-                    RTCPeerConnectionState::Connected => {
+                    RTCPeerConnectionState::Failed | RTCPeerConnectionState::Disconnected => {
+                        if let Ok(mut guard) = ctx.lock() {
+                            if let Some(tx) = guard.take() {
+                                let _ = tx.send(Err(format!("Connection state: {:?}", s)));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            })
+        }));
+    }
+
+    {
+        let ctx = connected_tx.clone();
+        let cfg_clone3 = cfg_clone.clone();
+        pc.on_ice_connection_state_change(Box::new(move |s: RTCIceConnectionState| {
+            let ctx = ctx.clone();
+            let cfg_phase = cfg_clone3.clone();
+            Box::pin(async move {
+                match s {
+                    RTCIceConnectionState::Connected | RTCIceConnectionState::Completed => {
                         log_phase(&cfg_phase, BootstrapPhase::StunConnected, None);
                         if let Ok(mut guard) = ctx.lock() {
                             if let Some(tx) = guard.take() {
@@ -269,10 +359,10 @@ async fn attempt_webrtc(
                             }
                         }
                     }
-                    RTCPeerConnectionState::Failed | RTCPeerConnectionState::Disconnected => {
+                    RTCIceConnectionState::Failed => {
                         if let Ok(mut guard) = ctx.lock() {
                             if let Some(tx) = guard.take() {
-                                let _ = tx.send(Err(format!("Connection state: {:?}", s)));
+                                let _ = tx.send(Err(format!("ICE state: {:?}", s)));
                             }
                         }
                     }
@@ -331,18 +421,29 @@ async fn attempt_webrtc(
         }
     });
 
-    // Wait for connection with timeout
+    // Phase 1: ICE connectivity must be established within the 2+2s window.
     match timeout(connect_timeout, connected_rx).await {
-        Ok(Ok(Ok(()))) => {
-            log_phase(cfg, BootstrapPhase::DataChannelOpen, None);
-            Ok(dc)
-        }
+        Ok(Ok(Ok(()))) => {}
         Ok(Ok(Err(e))) => bail!("WebRTC connection failed: {}", e),
         Ok(Err(_)) => bail!("Connection state channel dropped"),
         Err(_) => {
             log_phase(&cfg_clone, BootstrapPhase::StunTimeout, None);
             bail!("WebRTC ICE timeout ({}s)", connect_timeout.as_secs());
         }
+    }
+
+    // Phase 2: DataChannel must become usable shortly after ICE connected.
+    let dc_open_grace = resolve_datachannel_open_grace();
+    match timeout(dc_open_grace, dc_open_rx).await {
+        Ok(Ok(())) => {
+            log_phase(cfg, BootstrapPhase::DataChannelOpen, None);
+            Ok(dc)
+        }
+        Ok(Err(_)) => bail!("DataChannel open signal dropped"),
+        Err(_) => bail!(
+            "WebRTC DataChannel open timeout ({}s) after ICE connected",
+            dc_open_grace.as_secs()
+        ),
     }
 }
 
@@ -399,17 +500,87 @@ fn log_stun_success() {
     info!("WebRTC: connected via STUN (direct P2P) — no relay bandwidth used");
 }
 
-fn ice_network_types_from_env() -> Vec<NetworkType> {
-    if env_flag_enabled("RT_WEBRTC_IPV6_ENABLED") {
-        return vec![NetworkType::Udp4, NetworkType::Udp6];
+fn route_requires_relay(cfg: &WebRtcConfig) -> bool {
+    if let Some(route_type) = cfg.route_type.as_ref() {
+        if route_type.trim().eq_ignore_ascii_case("turn_relay") {
+            return true;
+        }
     }
-    vec![NetworkType::Udp4]
+    env_flag_enabled_with_default("RT_WEBRTC_FORCE_RELAY", false)
+}
+
+fn resolve_parallel_connect_timeout(cfg: &WebRtcConfig) -> Duration {
+    const FIRST_WINDOW_SECS: u64 = 2;
+    const EXTRA_WINDOW_SECS: u64 = 2;
+    const TOTAL_WINDOW_SECS: u64 = FIRST_WINDOW_SECS + EXTRA_WINDOW_SECS;
+
+    let mut secs = cfg.stun_timeout_secs;
+    if let Ok(raw) = std::env::var("RT_WEBRTC_CONNECT_TIMEOUT_SECS") {
+        if let Ok(parsed) = raw.trim().parse::<u64>() {
+            secs = parsed;
+        }
+    }
+    if secs == 0 {
+        secs = TOTAL_WINDOW_SECS;
+    }
+    if secs < FIRST_WINDOW_SECS {
+        secs = FIRST_WINDOW_SECS;
+    }
+    if secs > TOTAL_WINDOW_SECS {
+        secs = TOTAL_WINDOW_SECS;
+    }
+    Duration::from_secs(secs)
+}
+
+fn resolve_datachannel_open_grace() -> Duration {
+    const DEFAULT_GRACE_SECS: u64 = 8;
+    const MAX_GRACE_SECS: u64 = 12;
+
+    let mut secs = DEFAULT_GRACE_SECS;
+    if let Ok(raw) = std::env::var("RT_WEBRTC_DC_OPEN_GRACE_SECS") {
+        if let Ok(parsed) = raw.trim().parse::<u64>() {
+            secs = parsed;
+        }
+    }
+    if secs == 0 {
+        secs = DEFAULT_GRACE_SECS;
+    }
+    if secs > MAX_GRACE_SECS {
+        secs = MAX_GRACE_SECS;
+    }
+    Duration::from_secs(secs)
+}
+
+fn ice_network_types_for_servers(ice_servers: &[RTCIceServer]) -> Vec<NetworkType> {
+    let ipv6_enabled = env_flag_enabled("RT_WEBRTC_IPV6_ENABLED");
+    let tcp_enabled = env_flag_enabled_with_default("RT_WEBRTC_TCP_ENABLED", false);
+    let needs_tcp = tcp_enabled
+        && ice_servers
+            .iter()
+            .flat_map(|server| server.urls.iter())
+            .any(|url| turn_url_transport(url) == Some(TurnUrlTransport::Tcp));
+
+    let mut out = vec![NetworkType::Udp4];
+    if ipv6_enabled {
+        out.push(NetworkType::Udp6);
+    }
+    if needs_tcp {
+        out.push(NetworkType::Tcp4);
+        if ipv6_enabled {
+            out.push(NetworkType::Tcp6);
+        }
+    }
+    out
 }
 
 fn env_flag_enabled(name: &str) -> bool {
+    env_flag_enabled_with_default(name, false)
+}
+
+fn env_flag_enabled_with_default(name: &str, default: bool) -> bool {
     std::env::var(name)
         .map(|value| parse_bool_like(&value))
-        .unwrap_or(false)
+        .unwrap_or(default)
 }
 
 fn render_network_types(network_types: &[NetworkType]) -> String {
@@ -428,28 +599,101 @@ fn parse_bool_like(value: &str) -> bool {
 }
 
 fn filter_supported_turn_urls(urls: &[String]) -> Vec<String> {
-    urls.iter()
-        .filter(|url| is_supported_turn_url(url))
-        .cloned()
-        .collect()
-}
-
-fn is_supported_turn_url(url: &str) -> bool {
-    let normalized = url.trim().to_ascii_lowercase();
-    if !normalized.starts_with("turn:") {
-        return false;
-    }
-
-    let Some((_, query)) = normalized.split_once('?') else {
-        return true;
-    };
-
-    for kv in query.split('&') {
-        if let Some(value) = kv.strip_prefix("transport=") {
-            return value == "udp";
+    let tcp_enabled = env_flag_enabled_with_default("RT_WEBRTC_TCP_ENABLED", false);
+    let tls_only = tcp_enabled && env_flag_enabled_with_default("RT_WEBRTC_TURN_TLS_ONLY", false);
+    let mut expanded: Vec<(String, bool)> = Vec::new();
+    for raw in urls {
+        let turns_origin = raw.trim().to_ascii_lowercase().starts_with("turns:");
+        for expanded_url in expand_turn_urls(raw, tcp_enabled) {
+            let is_tls_tcp =
+                turns_origin && turn_url_transport(&expanded_url) == Some(TurnUrlTransport::Tcp);
+            expanded.push((expanded_url, is_tls_tcp));
         }
     }
-    true
+
+    let mut out = Vec::new();
+    if tls_only {
+        for (url, is_tls_tcp) in &expanded {
+            if !is_tls_tcp {
+                continue;
+            }
+            if !out.iter().any(|existing| existing == url) {
+                out.push(url.clone());
+            }
+        }
+        if !out.is_empty() {
+            info!(
+                "WebRTC: RT_WEBRTC_TURN_TLS_ONLY active; using TLS TURN candidates only ({})",
+                out.join(", ")
+            );
+            return out;
+        }
+        warn!(
+            "WebRTC: RT_WEBRTC_TURN_TLS_ONLY active but no TLS TURN candidate found; falling back to full supported TURN candidate set"
+        );
+    }
+
+    for (url, _) in expanded {
+        if !out.iter().any(|existing| existing == &url) {
+            out.push(url);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+fn clear_turn_env_for_test() {
+    std::env::remove_var("RT_WEBRTC_TCP_ENABLED");
+    std::env::remove_var("RT_WEBRTC_TURN_TLS_ONLY");
+}
+
+#[cfg(test)]
+fn set_env_for_test(name: &str, value: &str) {
+    std::env::set_var(name, value);
+}
+
+#[cfg(test)]
+fn normalize_urls(mut urls: Vec<String>) -> Vec<String> {
+    urls.sort();
+    urls
+}
+
+#[cfg(test)]
+mod turn_filter_tests {
+    use super::*;
+
+    #[test]
+    fn test_filter_supported_turn_urls_default_keeps_all_supported_candidates() {
+        clear_turn_env_for_test();
+        set_env_for_test("RT_WEBRTC_TCP_ENABLED", "1");
+        set_env_for_test("RT_WEBRTC_TURN_TLS_ONLY", "0");
+        let urls = vec![
+            "turn:turn.robotunnel.io:3478".to_string(),
+            "turns:turn.robotunnel.io:5349".to_string(),
+        ];
+        let got = normalize_urls(filter_supported_turn_urls(&urls));
+        let want = normalize_urls(vec![
+            "turn:turn.robotunnel.io:3478?transport=udp".to_string(),
+            "turn:turn.robotunnel.io:3478?transport=tcp".to_string(),
+            "turn:turn.robotunnel.io:5349?transport=tcp".to_string(),
+        ]);
+        assert_eq!(got, want);
+        clear_turn_env_for_test();
+    }
+
+    #[test]
+    fn test_filter_supported_turn_urls_tls_only_can_be_enabled() {
+        clear_turn_env_for_test();
+        set_env_for_test("RT_WEBRTC_TCP_ENABLED", "1");
+        set_env_for_test("RT_WEBRTC_TURN_TLS_ONLY", "1");
+        let urls = vec![
+            "turn:turn.robotunnel.io:3478".to_string(),
+            "turns:turn.robotunnel.io:5349".to_string(),
+        ];
+        let got = filter_supported_turn_urls(&urls);
+        assert_eq!(got, vec!["turn:turn.robotunnel.io:5349?transport=tcp"]);
+        clear_turn_env_for_test();
+    }
 }
 
 #[cfg(test)]
@@ -472,13 +716,142 @@ mod tests {
 
     #[test]
     fn test_is_supported_turn_url() {
-        assert!(is_supported_turn_url("turn:turn.robotunnel.io:3478"));
+        assert!(is_supported_turn_url("turn:turn.robotunnel.io:3478", true));
         assert!(is_supported_turn_url(
-            "turn:turn.robotunnel.io:3478?transport=udp"
+            "turn:turn.robotunnel.io:3478?transport=udp",
+            true
+        ));
+        assert!(is_supported_turn_url(
+            "turn:turn.robotunnel.io:3478?transport=tcp",
+            true
+        ));
+        assert!(is_supported_turn_url("turns:turn.robotunnel.io:5349", true));
+        assert!(!is_supported_turn_url(
+            "turns:turn.robotunnel.io:5349?transport=udp",
+            true
         ));
         assert!(!is_supported_turn_url(
-            "turn:turn.robotunnel.io:3478?transport=tcp"
+            "turn:turn.robotunnel.io:3478?transport=tcp",
+            false
         ));
-        assert!(!is_supported_turn_url("turns:turn.robotunnel.io:5349"));
+        assert!(!is_supported_turn_url(
+            "turns:turn.robotunnel.io:5349",
+            false
+        ));
     }
+
+    #[test]
+    fn test_ice_network_types_include_tcp_when_turn_tcp_present() {
+        std::env::set_var("RT_WEBRTC_TCP_ENABLED", "1");
+        let servers = vec![RTCIceServer {
+            urls: vec!["turn:turn.robotunnel.io:3478?transport=tcp".to_string()],
+            ..Default::default()
+        }];
+        let types = ice_network_types_for_servers(&servers);
+        assert!(types.contains(&NetworkType::Udp4));
+        assert!(types.contains(&NetworkType::Tcp4));
+        std::env::remove_var("RT_WEBRTC_TCP_ENABLED");
+    }
+
+    #[test]
+    fn test_expand_turn_urls_normalizes_turns_and_adds_tcp_variant() {
+        let urls = expand_turn_urls("turns:turn.robotunnel.io:5349", true);
+        assert_eq!(urls, vec!["turn:turn.robotunnel.io:5349?transport=tcp"]);
+
+        let urls = expand_turn_urls("turn:turn.robotunnel.io:3478", true);
+        assert_eq!(
+            urls,
+            vec![
+                "turn:turn.robotunnel.io:3478?transport=udp",
+                "turn:turn.robotunnel.io:3478?transport=tcp"
+            ]
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnUrlTransport {
+    Udp,
+    Tcp,
+}
+
+fn is_supported_turn_url(url: &str, tcp_enabled: bool) -> bool {
+    match turn_url_transport(url) {
+        Some(TurnUrlTransport::Udp) => true,
+        Some(TurnUrlTransport::Tcp) => tcp_enabled,
+        None => false,
+    }
+}
+
+fn expand_turn_urls(url: &str, tcp_enabled: bool) -> Vec<String> {
+    let normalized = url.trim().to_ascii_lowercase();
+    let (base, query) = normalized
+        .split_once('?')
+        .map(|(lhs, rhs)| (lhs, Some(rhs)))
+        .unwrap_or((normalized.as_str(), None));
+    let query_transport = query.and_then(parse_turn_transport_query);
+
+    if base.starts_with("turns:") {
+        if !tcp_enabled || query_transport == Some("udp") {
+            return Vec::new();
+        }
+        let host = base.trim_start_matches("turns:");
+        return vec![format!("turn:{}?transport=tcp", host)];
+    }
+
+    if !base.starts_with("turn:") {
+        return Vec::new();
+    }
+
+    let host = base.trim_start_matches("turn:");
+    match query_transport {
+        Some("udp") => vec![format!("turn:{}?transport=udp", host)],
+        Some("tcp") if tcp_enabled => vec![format!("turn:{}?transport=tcp", host)],
+        Some("tcp") => Vec::new(),
+        Some(_) => Vec::new(),
+        None if tcp_enabled => vec![
+            format!("turn:{}?transport=udp", host),
+            format!("turn:{}?transport=tcp", host),
+        ],
+        None => vec![format!("turn:{}?transport=udp", host)],
+    }
+}
+
+fn turn_url_transport(url: &str) -> Option<TurnUrlTransport> {
+    let normalized = url.trim().to_ascii_lowercase();
+    let (base, query) = normalized
+        .split_once('?')
+        .map(|(lhs, rhs)| (lhs, Some(rhs)))
+        .unwrap_or((normalized.as_str(), None));
+
+    let query_transport = query.and_then(parse_turn_transport_query);
+
+    if base.starts_with("turns:") {
+        return match query_transport {
+            Some("udp") => None,
+            Some("tcp") | None => Some(TurnUrlTransport::Tcp),
+            Some(_) => None,
+        };
+    }
+
+    if !base.starts_with("turn:") {
+        return None;
+    }
+
+    match query_transport {
+        Some("udp") | None => Some(TurnUrlTransport::Udp),
+        Some("tcp") => Some(TurnUrlTransport::Tcp),
+        Some(_) => None,
+    }
+}
+
+fn parse_turn_transport_query(query: &str) -> Option<&str> {
+    query.split('&').find_map(|kv| {
+        let (key, value) = kv.split_once('=')?;
+        if key == "transport" {
+            Some(value)
+        } else {
+            None
+        }
+    })
 }

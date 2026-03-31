@@ -122,6 +122,8 @@ pub struct WebRtcBootstrapPayload {
     pub bootstrap_id: String,
     pub cli_public_ip: Option<String>,
     pub cli_lan_cidr: Option<String>,
+    #[serde(default)]
+    pub route_type: Option<String>,
 }
 
 /// JSON payload for WebRtcTeardown frame.
