@@ -12,8 +12,7 @@ use rt_core::config::AgentConfig;
 use rt_core::protocol::{CommandRequest, CommandResponse, CommandStatus, FrameType};
 use rt_core::tunnel::IncomingCommand;
 use rt_webrtc::{ConnectionType, WebRtcConfig};
-use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -297,6 +296,121 @@ struct RelaySession {
     writer_task: JoinHandle<()>,
 }
 
+#[derive(Debug, Clone)]
+struct RelayOutboundEnvelope {
+    msg_type: String,
+    relay_id: String,
+    payload: String,
+    enqueued_at: Instant,
+}
+
+#[derive(Debug, Default, Clone)]
+struct RelayQueueStats {
+    sent: u64,
+    dropped_data: u64,
+    max_queue_depth: usize,
+    enqueue_wait_samples: u64,
+    enqueue_wait_total_ms: u64,
+    enqueue_wait_max_ms: u64,
+    scheduler_lag_samples: u64,
+    scheduler_lag_total_ms: u64,
+    scheduler_lag_max_ms: u64,
+}
+
+type RelayQueueStatsMap = Arc<Mutex<HashMap<String, RelayQueueStats>>>;
+
+const RELAY_DATA_QUEUE_LIMIT: usize = 256;
+
+#[derive(Default)]
+struct RelayOutboundQueue {
+    control: VecDeque<RelayOutboundEnvelope>,
+    data: VecDeque<RelayOutboundEnvelope>,
+}
+
+struct RelayOutboundScheduler {
+    queues: HashMap<String, RelayOutboundQueue>,
+    order: VecDeque<String>,
+    data_limit: usize,
+}
+
+struct RelayEnqueueOutcome {
+    queue_depth: usize,
+    dropped_data: bool,
+}
+
+impl RelayOutboundScheduler {
+    fn new(data_limit: usize) -> Self {
+        Self {
+            queues: HashMap::new(),
+            order: VecDeque::new(),
+            data_limit: data_limit.max(1),
+        }
+    }
+
+    fn enqueue(&mut self, msg: RelayOutboundEnvelope) -> RelayEnqueueOutcome {
+        let relay_id = msg.relay_id.trim().to_string();
+        let is_data = msg.msg_type.trim() == "relay_data";
+        let queue = self.queues.entry(relay_id.clone()).or_default();
+        let mut dropped_data = false;
+        if is_data {
+            if queue.data.len() >= self.data_limit {
+                let _ = queue.data.pop_front();
+                dropped_data = true;
+            }
+            queue.data.push_back(msg);
+        } else {
+            queue.control.push_back(msg);
+        }
+        if !self.order.iter().any(|item| item == &relay_id) {
+            self.order.push_back(relay_id);
+        }
+        RelayEnqueueOutcome {
+            queue_depth: queue.control.len() + queue.data.len(),
+            dropped_data,
+        }
+    }
+
+    fn pop_next(&mut self) -> Option<RelayOutboundEnvelope> {
+        let turns = self.order.len();
+        for _ in 0..turns {
+            let relay_id = match self.order.pop_front() {
+                Some(v) => v,
+                None => return None,
+            };
+            let (msg, has_more) = match self.queues.get_mut(&relay_id) {
+                Some(queue) => {
+                    let msg = if let Some(control_msg) = queue.control.pop_front() {
+                        Some(control_msg)
+                    } else {
+                        queue.data.pop_front()
+                    };
+                    let has_more = !queue.control.is_empty() || !queue.data.is_empty();
+                    (msg, has_more)
+                }
+                None => (None, false),
+            };
+            if has_more {
+                self.order.push_back(relay_id.clone());
+            } else {
+                self.queues.remove(&relay_id);
+            }
+            if msg.is_some() {
+                return msg;
+            }
+        }
+        None
+    }
+}
+
+fn duration_to_millis_u64(duration: Duration) -> u64 {
+    let millis = duration.as_millis();
+    if millis > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        millis as u64
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 struct WebRtcRelayFrame {
     #[serde(default)]
@@ -443,30 +557,56 @@ pub fn start_control_plane_bridge_if_enabled(
 
     Some(tokio::spawn(async move {
         let mut resolved_robot_id = configured_robot_id.clone();
+        let robot_id = loop {
+            if *shutdown_rx.borrow() {
+                return;
+            }
+            if resolved_robot_id.is_none() {
+                resolved_robot_id =
+                    resolve_robot_id_from_platform(&platform_api_url, &api_key).await;
+            }
+            if let Some(id) = resolved_robot_id.clone() {
+                break id;
+            }
+            tracing::warn!(
+                "control plane channel: robot_id missing and bootstrap lookup failed; retrying"
+            );
+            tokio::select! {
+                _ = sleep(Duration::from_secs(20)) => {}
+                _ = shutdown_rx.changed() => { return; }
+            }
+        };
+
+        let (relay_outbound_tx, relay_outbound_rx) = mpsc::channel::<RelayOutboundEnvelope>(4096);
+        let closed_relays: ClosedRelaySet = Arc::new(Mutex::new(HashSet::new()));
+        let relay_stats: RelayQueueStatsMap = Arc::new(Mutex::new(HashMap::new()));
+        let relay_task = tokio::spawn(run_relay_plane(
+            platform_ws_url.clone(),
+            robot_id.clone(),
+            api_key.clone(),
+            relay_outbound_tx.clone(),
+            relay_outbound_rx,
+            closed_relays.clone(),
+            relay_stats.clone(),
+            shutdown_rx.clone(),
+        ));
+
+        let header_value = match HeaderValue::from_str(&api_key) {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!(
+                    "[control] invalid api_key header value: robot={} err={:#}",
+                    robot_id,
+                    err
+                );
+                return;
+            }
+        };
 
         loop {
             if *shutdown_rx.borrow() {
                 break;
             }
-
-            if resolved_robot_id.is_none() {
-                resolved_robot_id =
-                    resolve_robot_id_from_platform(&platform_api_url, &api_key).await;
-            }
-
-            let robot_id = match resolved_robot_id.clone() {
-                Some(v) => v,
-                None => {
-                    tracing::warn!(
-                        "control plane channel: robot_id missing and bootstrap lookup failed; retrying"
-                    );
-                    tokio::select! {
-                        _ = sleep(Duration::from_secs(20)) => {}
-                        _ = shutdown_rx.changed() => { break; }
-                    }
-                    continue;
-                }
-            };
 
             let session_id = uuid::Uuid::new_v4().to_string();
             let control_url = format!(
@@ -480,22 +620,6 @@ pub fn start_control_plane_bridge_if_enabled(
                 platform_ws_url,
                 platform_ws_url
             );
-
-            let header_value = match HeaderValue::from_str(&api_key) {
-                Ok(v) => v,
-                Err(err) => {
-                    tracing::warn!(
-                        "[control] invalid api_key header value: robot={} err={:#}",
-                        robot_id,
-                        err
-                    );
-                    tokio::select! {
-                        _ = sleep(Duration::from_secs(3)) => {}
-                        _ = shutdown_rx.changed() => { break; }
-                    }
-                    continue;
-                }
-            };
 
             let mut control_request = match control_url.clone().into_client_request() {
                 Ok(req) => req,
@@ -515,6 +639,7 @@ pub fn start_control_plane_bridge_if_enabled(
             control_request
                 .headers_mut()
                 .insert("X-Robot-API-Key", header_value.clone());
+
             let control_ws = match tokio_tungstenite::connect_async(control_request).await {
                 Ok((stream, _)) => {
                     tracing::info!(
@@ -536,32 +661,13 @@ pub fn start_control_plane_bridge_if_enabled(
 
             let (mut control_write, mut control_read) = control_ws.split();
             let (control_outbound_tx, mut control_outbound_rx) = mpsc::channel::<String>(512);
-            let (relay_outbound_tx, relay_outbound_rx) = mpsc::channel::<String>(2048);
-            let closed_relays: ClosedRelaySet = Arc::new(Mutex::new(HashSet::new()));
-            let (control_relay_closed_tx, mut control_relay_closed_rx) =
-                mpsc::channel::<String>(128);
-            let mut control_relays: HashMap<String, RelaySession> = HashMap::new();
-            let (relay_stop_tx, relay_stop_rx) = watch::channel(false);
-            let relay_task = tokio::spawn(run_relay_plane(
-                platform_ws_url.clone(),
-                robot_id.clone(),
-                session_id.clone(),
-                api_key.clone(),
-                relay_outbound_tx.clone(),
-                relay_outbound_rx,
-                closed_relays.clone(),
-                relay_stop_rx,
-                shutdown_rx.clone(),
-            ));
             let mut control_ping_tick = tokio::time::interval(Duration::from_secs(30));
             let mut control_heartbeat_tick = tokio::time::interval(Duration::from_secs(20));
             let mut control_watchdog_tick = tokio::time::interval(Duration::from_secs(10));
             let mut last_control_inbound = Instant::now();
             let control_inbound_timeout = Duration::from_secs(75);
             let control_write_timeout = Duration::from_secs(8);
-            let mut shutdown_requested = false;
-
-            loop {
+            let reconnect_control = loop {
                 tokio::select! {
                     _ = control_ping_tick.tick() => {
                         match timeout(control_write_timeout, control_write.send(Message::Ping(Vec::new().into()))).await {
@@ -573,7 +679,7 @@ pub fn start_control_plane_bridge_if_enabled(
                                     session_id,
                                     err
                                 );
-                                break;
+                                break true;
                             }
                             Err(_) => {
                                 tracing::warn!(
@@ -582,7 +688,7 @@ pub fn start_control_plane_bridge_if_enabled(
                                     session_id,
                                     control_write_timeout.as_secs()
                                 );
-                                break;
+                                break true;
                             }
                         }
                     }
@@ -601,7 +707,7 @@ pub fn start_control_plane_bridge_if_enabled(
                                     session_id,
                                     err
                                 );
-                                break;
+                                break true;
                             }
                             Err(_) => {
                                 tracing::warn!(
@@ -610,7 +716,7 @@ pub fn start_control_plane_bridge_if_enabled(
                                     session_id,
                                     control_write_timeout.as_secs()
                                 );
-                                break;
+                                break true;
                             }
                         }
                     }
@@ -622,7 +728,7 @@ pub fn start_control_plane_bridge_if_enabled(
                                 session_id,
                                 control_inbound_timeout.as_secs()
                             );
-                            break;
+                            break true;
                         }
                     }
                     Some(outbound) = control_outbound_rx.recv() => {
@@ -635,7 +741,7 @@ pub fn start_control_plane_bridge_if_enabled(
                                     session_id,
                                     err
                                 );
-                                break;
+                                break true;
                             }
                             Err(_) => {
                                 tracing::warn!(
@@ -644,7 +750,7 @@ pub fn start_control_plane_bridge_if_enabled(
                                     session_id,
                                     control_write_timeout.as_secs()
                                 );
-                                break;
+                                break true;
                             }
                         }
                     }
@@ -746,7 +852,7 @@ pub fn start_control_plane_bridge_if_enabled(
                                                 }
                                                 let outbound = serde_json::Value::Object(outbound).to_string();
                                                 if control_outbound_tx.send(outbound).await.is_err() {
-                                                    break;
+                                                    break true;
                                                 }
                                             }
                                             "status_request" => {
@@ -790,18 +896,16 @@ pub fn start_control_plane_bridge_if_enabled(
                                                 }
                                                 let outbound = serde_json::Value::Object(outbound).to_string();
                                                 if control_outbound_tx.send(outbound).await.is_err() {
-                                                    break;
+                                                    break true;
                                                 }
                                             }
                                             "relay_open" | "relay_data" | "relay_close" => {
-                                                handle_relay_inbound_message(
-                                                    msg,
-                                                    &mut control_relays,
-                                                    &control_outbound_tx,
-                                                    &control_relay_closed_tx,
-                                                    &closed_relays,
-                                                    "control_fallback",
-                                                ).await;
+                                                tracing::warn!(
+                                                    "[control] relay payload received on control channel; ignored: robot={} session_id={} type={}",
+                                                    robot_id,
+                                                    session_id,
+                                                    msg.msg_type
+                                                );
                                             }
                                             other => {
                                                 tracing::debug!("[control] ignoring message type={}", other);
@@ -829,7 +933,7 @@ pub fn start_control_plane_bridge_if_enabled(
                                             session_id,
                                             err
                                         );
-                                        break;
+                                        break true;
                                     }
                                     Err(_) => {
                                         tracing::warn!(
@@ -838,7 +942,7 @@ pub fn start_control_plane_bridge_if_enabled(
                                             session_id,
                                             control_write_timeout.as_secs()
                                         );
-                                        break;
+                                        break true;
                                     }
                                 }
                             }
@@ -851,7 +955,7 @@ pub fn start_control_plane_bridge_if_enabled(
                                     robot_id,
                                     session_id
                                 );
-                                break;
+                                break true;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(err)) => {
@@ -861,7 +965,7 @@ pub fn start_control_plane_bridge_if_enabled(
                                     session_id,
                                     err
                                 );
-                                break;
+                                break true;
                             }
                             None => {
                                 tracing::info!(
@@ -869,65 +973,54 @@ pub fn start_control_plane_bridge_if_enabled(
                                     robot_id,
                                     session_id
                                 );
-                                break;
+                                break true;
                             }
                         }
                     }
-                    Some(relay_id) = control_relay_closed_rx.recv() => {
-                        mark_relay_closed(&closed_relays, &relay_id).await;
-                        if let Some(relay) = control_relays.remove(&relay_id) {
-                            relay.reader_task.abort();
-                            relay.writer_task.abort();
-                        }
-                    }
                     _ = shutdown_rx.changed() => {
-                        shutdown_requested = true;
-                        break;
+                        break false;
                     }
                 }
-            }
+            };
 
-            for (_, relay) in control_relays.drain() {
-                relay.reader_task.abort();
-                relay.writer_task.abort();
-            }
-            let _ = relay_stop_tx.send(true);
-            let _ = timeout(Duration::from_secs(2), relay_task).await;
             let _ = control_write.send(Message::Close(None)).await;
 
-            if shutdown_requested {
+            if !reconnect_control {
                 break;
             }
-
             tokio::select! {
                 _ = sleep(Duration::from_secs(2)) => {}
                 _ = shutdown_rx.changed() => { break; }
             }
         }
+
+        drop(relay_outbound_tx);
+        let _ = timeout(Duration::from_secs(2), relay_task).await;
     }))
 }
 
 async fn run_relay_plane(
     platform_ws_url: String,
     robot_id: String,
-    session_id: String,
     api_key: String,
-    relay_outbound_tx: mpsc::Sender<String>,
-    mut relay_outbound_rx: mpsc::Receiver<String>,
+    relay_outbound_tx: mpsc::Sender<RelayOutboundEnvelope>,
+    mut relay_outbound_rx: mpsc::Receiver<RelayOutboundEnvelope>,
     closed_relays: ClosedRelaySet,
-    mut relay_stop_rx: watch::Receiver<bool>,
+    relay_stats: RelayQueueStatsMap,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    let relay_url = format!(
-        "{}/api/agent/relay?robot_id={}&session_id={}",
-        platform_ws_url, robot_id, session_id
-    );
     let relay_write_timeout = Duration::from_secs(8);
 
     loop {
-        if *relay_stop_rx.borrow() || *shutdown_rx.borrow() {
+        if *shutdown_rx.borrow() {
             return;
         }
+
+        let relay_session_id = uuid::Uuid::new_v4().to_string();
+        let relay_url = format!(
+            "{}/api/agent/relay?robot_id={}&session_id={}",
+            platform_ws_url, robot_id, relay_session_id
+        );
 
         let header_value = match HeaderValue::from_str(&api_key) {
             Ok(v) => v,
@@ -935,7 +1028,7 @@ async fn run_relay_plane(
                 tracing::warn!(
                     "[relay] invalid api_key header value: robot={} session_id={} err={:#}",
                     robot_id,
-                    session_id,
+                    relay_session_id,
                     err
                 );
                 return;
@@ -947,12 +1040,11 @@ async fn run_relay_plane(
                 tracing::warn!(
                     "[relay] failed to build relay ws request: robot={} session_id={} err={:#}",
                     robot_id,
-                    session_id,
+                    relay_session_id,
                     err
                 );
                 tokio::select! {
                     _ = sleep(Duration::from_secs(2)) => {}
-                    _ = relay_stop_rx.changed() => {}
                     _ = shutdown_rx.changed() => {}
                 }
                 continue;
@@ -967,7 +1059,7 @@ async fn run_relay_plane(
                 tracing::info!(
                     "[relay] connected: robot={} session_id={}",
                     robot_id,
-                    session_id
+                    relay_session_id
                 );
                 stream
             }
@@ -975,12 +1067,11 @@ async fn run_relay_plane(
                 tracing::warn!(
                     "[relay] connect failed: robot={} session_id={} err={:#}",
                     robot_id,
-                    session_id,
+                    relay_session_id,
                     err
                 );
                 tokio::select! {
                     _ = sleep(Duration::from_secs(2)) => {}
-                    _ = relay_stop_rx.changed() => {}
                     _ = shutdown_rx.changed() => {}
                 }
                 continue;
@@ -996,8 +1087,59 @@ async fn run_relay_plane(
         let mut last_relay_inbound = Instant::now();
         let relay_inbound_timeout = Duration::from_secs(75);
         let mut shutdown_now = false;
+        let mut scheduler = RelayOutboundScheduler::new(RELAY_DATA_QUEUE_LIMIT);
+        let mut reconnect_relay = false;
 
         loop {
+            while let Ok(outbound) = relay_outbound_rx.try_recv() {
+                if should_drop_closed_relay_outbound(&outbound, &closed_relays).await {
+                    continue;
+                }
+                enqueue_relay_outbound(&mut scheduler, outbound, &relay_stats).await;
+            }
+            if let Some(outbound) = scheduler.pop_next() {
+                record_relay_scheduler_lag(
+                    &relay_stats,
+                    &outbound.relay_id,
+                    outbound.enqueued_at.elapsed(),
+                )
+                .await;
+                match timeout(
+                    relay_write_timeout,
+                    relay_write.send(Message::Text(outbound.payload.clone().into())),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        record_relay_sent(&relay_stats, &outbound.relay_id).await;
+                        continue;
+                    }
+                    Ok(Err(err)) => {
+                        tracing::warn!(
+                            "[relay] outbound write failed: robot={} session_id={} relay_id={} type={} err={}",
+                            robot_id,
+                            relay_session_id,
+                            outbound.relay_id,
+                            outbound.msg_type,
+                            err
+                        );
+                        reconnect_relay = true;
+                        break;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "[relay] outbound write timeout: robot={} session_id={} relay_id={} type={} timeout={}s",
+                            robot_id,
+                            relay_session_id,
+                            outbound.relay_id,
+                            outbound.msg_type,
+                            relay_write_timeout.as_secs()
+                        );
+                        reconnect_relay = true;
+                        break;
+                    }
+                }
+            }
             tokio::select! {
                 _ = relay_ping_tick.tick() => {
                     match timeout(relay_write_timeout, relay_write.send(Message::Ping(Vec::new().into()))).await {
@@ -1006,18 +1148,20 @@ async fn run_relay_plane(
                             tracing::warn!(
                                 "[relay] ping failed: robot={} session_id={} err={}",
                                 robot_id,
-                                session_id,
+                                relay_session_id,
                                 err
                             );
+                            reconnect_relay = true;
                             break;
                         }
                         Err(_) => {
                             tracing::warn!(
                                 "[relay] ping write timeout: robot={} session_id={} timeout={}s",
                                 robot_id,
-                                session_id,
+                                relay_session_id,
                                 relay_write_timeout.as_secs()
                             );
+                            reconnect_relay = true;
                             break;
                         }
                     }
@@ -1027,9 +1171,10 @@ async fn run_relay_plane(
                         tracing::warn!(
                             "[relay] watchdog timeout: robot={} session_id={} no inbound message for {}s, reconnecting",
                             robot_id,
-                            session_id,
+                            relay_session_id,
                             relay_inbound_timeout.as_secs()
                         );
+                        reconnect_relay = true;
                         break;
                     }
                 }
@@ -1044,27 +1189,7 @@ async fn run_relay_plane(
                     if should_drop_closed_relay_outbound(&outbound, &closed_relays).await {
                         continue;
                     }
-                    match timeout(relay_write_timeout, relay_write.send(Message::Text(outbound.into()))).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(err)) => {
-                            tracing::warn!(
-                                "[relay] outbound write failed: robot={} session_id={} err={}",
-                                robot_id,
-                                session_id,
-                                err
-                            );
-                            break;
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                "[relay] outbound write timeout: robot={} session_id={} timeout={}s",
-                                robot_id,
-                                session_id,
-                                relay_write_timeout.as_secs()
-                            );
-                            break;
-                        }
-                    }
+                    enqueue_relay_outbound(&mut scheduler, outbound, &relay_stats).await;
                 }
                 Some(relay_id) = relay_closed_rx.recv() => {
                     mark_relay_closed(&closed_relays, &relay_id).await;
@@ -1087,6 +1212,7 @@ async fn run_relay_plane(
                                                 &relay_outbound_tx,
                                                 &relay_closed_tx,
                                                 &closed_relays,
+                                                &relay_stats,
                                                 "relay",
                                             ).await;
                                         }
@@ -1108,7 +1234,7 @@ async fn run_relay_plane(
                                     tracing::warn!(
                                         "[relay] pong write failed: robot={} session_id={} err={}",
                                         robot_id,
-                                        session_id,
+                                        relay_session_id,
                                         err
                                     );
                                     break;
@@ -1117,7 +1243,7 @@ async fn run_relay_plane(
                                     tracing::warn!(
                                         "[relay] pong write timeout: robot={} session_id={} timeout={}s",
                                         robot_id,
-                                        session_id,
+                                        relay_session_id,
                                         relay_write_timeout.as_secs()
                                     );
                                     break;
@@ -1131,8 +1257,9 @@ async fn run_relay_plane(
                             tracing::info!(
                                 "[relay] platform closed relay channel: robot={} session_id={}",
                                 robot_id,
-                                session_id
+                                relay_session_id
                             );
+                            reconnect_relay = true;
                             break;
                         }
                         Some(Ok(_)) => {}
@@ -1140,24 +1267,22 @@ async fn run_relay_plane(
                             tracing::warn!(
                                 "[relay] read failed: robot={} session_id={} err={}",
                                 robot_id,
-                                session_id,
+                                relay_session_id,
                                 err
                             );
+                            reconnect_relay = true;
                             break;
                         }
                         None => {
                             tracing::info!(
                                 "[relay] channel ended: robot={} session_id={}",
                                 robot_id,
-                                session_id
+                                relay_session_id
                             );
+                            reconnect_relay = true;
                             break;
                         }
                     }
-                }
-                _ = relay_stop_rx.changed() => {
-                    shutdown_now = true;
-                    break;
                 }
                 _ = shutdown_rx.changed() => {
                     shutdown_now = true;
@@ -1171,14 +1296,17 @@ async fn run_relay_plane(
             relay.writer_task.abort();
         }
         let _ = relay_write.send(Message::Close(None)).await;
+        log_relay_queue_stats(&relay_stats, &robot_id, &relay_session_id).await;
 
-        if shutdown_now || *relay_stop_rx.borrow() || *shutdown_rx.borrow() {
+        if shutdown_now || *shutdown_rx.borrow() {
+            return;
+        }
+        if !reconnect_relay {
             return;
         }
 
         tokio::select! {
             _ = sleep(Duration::from_secs(1)) => {}
-            _ = relay_stop_rx.changed() => {}
             _ = shutdown_rx.changed() => {}
         }
     }
@@ -1187,9 +1315,10 @@ async fn run_relay_plane(
 async fn handle_relay_inbound_message(
     msg: AgentControlInbound,
     relays: &mut HashMap<String, RelaySession>,
-    relay_outbound_tx: &mpsc::Sender<String>,
+    relay_outbound_tx: &mpsc::Sender<RelayOutboundEnvelope>,
     relay_closed_tx: &mpsc::Sender<String>,
     closed_relays: &ClosedRelaySet,
+    relay_stats: &RelayQueueStatsMap,
     source: &str,
 ) {
     match msg.msg_type.as_str() {
@@ -1197,14 +1326,14 @@ async fn handle_relay_inbound_message(
             let relay_id = normalize_optional(msg.relay_id.clone());
             let port = msg.port.unwrap_or_default();
             if relay_id.is_none() || port == 0 {
-                let outbound = relay_control_message(
+                let outbound = relay_control_envelope(
                     "relay_open_ack",
                     relay_id.as_deref().unwrap_or(""),
                     None,
                     Some("error"),
                     Some("invalid relay_open payload"),
                 );
-                let _ = relay_outbound_tx.send(outbound).await;
+                let _ = send_relay_outbound(relay_outbound_tx, relay_stats, outbound).await;
                 return;
             }
             let relay_id = relay_id.unwrap_or_default();
@@ -1219,14 +1348,15 @@ async fn handle_relay_inbound_message(
                 relay_outbound_tx.clone(),
                 relay_closed_tx.clone(),
                 closed_relays.clone(),
+                relay_stats.clone(),
             )
             .await
             {
                 Ok(relay) => {
                     relays.insert(relay_id.clone(), relay);
                     let outbound =
-                        relay_control_message("relay_open_ack", &relay_id, None, Some("ok"), None);
-                    let _ = relay_outbound_tx.send(outbound).await;
+                        relay_control_envelope("relay_open_ack", &relay_id, None, Some("ok"), None);
+                    let _ = send_relay_outbound(relay_outbound_tx, relay_stats, outbound).await;
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -1235,14 +1365,14 @@ async fn handle_relay_inbound_message(
                         relay_id,
                         err
                     );
-                    let outbound = relay_control_message(
+                    let outbound = relay_control_envelope(
                         "relay_open_ack",
                         &relay_id,
                         None,
                         Some("error"),
                         Some(&err),
                     );
-                    let _ = relay_outbound_tx.send(outbound).await;
+                    let _ = send_relay_outbound(relay_outbound_tx, relay_stats, outbound).await;
                 }
             }
         }
@@ -1271,24 +1401,24 @@ async fn handle_relay_inbound_message(
                         stale.reader_task.abort();
                         stale.writer_task.abort();
                     }
-                    let outbound = relay_control_message(
+                    let outbound = relay_control_envelope(
                         "relay_close",
                         &relay_id,
                         None,
                         None,
                         Some("relay write channel closed"),
                     );
-                    let _ = relay_outbound_tx.send(outbound).await;
+                    let _ = send_relay_outbound(relay_outbound_tx, relay_stats, outbound).await;
                 }
             } else {
-                let outbound = relay_control_message(
+                let outbound = relay_control_envelope(
                     "relay_close",
                     &relay_id,
                     None,
                     None,
                     Some("relay not found"),
                 );
-                let _ = relay_outbound_tx.send(outbound).await;
+                let _ = send_relay_outbound(relay_outbound_tx, relay_stats, outbound).await;
             }
         }
         "relay_close" => {
@@ -1321,13 +1451,6 @@ async fn resolve_robot_id_from_platform(api_url: &str, api_key: &str) -> Option<
 
 type ClosedRelaySet = Arc<Mutex<HashSet<String>>>;
 
-#[derive(Deserialize)]
-struct RelayOutboundMeta {
-    #[serde(rename = "type")]
-    msg_type: String,
-    relay_id: Option<String>,
-}
-
 async fn mark_relay_closed(closed_relays: &ClosedRelaySet, relay_id: &str) {
     let relay_id = relay_id.trim();
     if relay_id.is_empty() {
@@ -1344,27 +1467,133 @@ async fn clear_relay_closed(closed_relays: &ClosedRelaySet, relay_id: &str) {
     closed_relays.lock().await.remove(relay_id);
 }
 
-async fn should_drop_closed_relay_outbound(outbound: &str, closed_relays: &ClosedRelaySet) -> bool {
-    let meta = match serde_json::from_str::<RelayOutboundMeta>(outbound) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    if meta.msg_type.trim() != "relay_data" {
+async fn should_drop_closed_relay_outbound(
+    outbound: &RelayOutboundEnvelope,
+    closed_relays: &ClosedRelaySet,
+) -> bool {
+    if outbound.msg_type.trim() != "relay_data" {
         return false;
     }
-    let relay_id = match meta.relay_id.as_deref().map(str::trim) {
-        Some(v) if !v.is_empty() => v,
-        _ => return false,
-    };
+    let relay_id = outbound.relay_id.trim();
+    if relay_id.is_empty() {
+        return false;
+    }
     closed_relays.lock().await.contains(relay_id)
+}
+
+async fn enqueue_relay_outbound(
+    scheduler: &mut RelayOutboundScheduler,
+    outbound: RelayOutboundEnvelope,
+    relay_stats: &RelayQueueStatsMap,
+) {
+    let relay_id = outbound.relay_id.clone();
+    let outcome = scheduler.enqueue(outbound);
+    let mut guard = relay_stats.lock().await;
+    let entry = guard.entry(relay_id).or_default();
+    entry.max_queue_depth = entry.max_queue_depth.max(outcome.queue_depth);
+    if outcome.dropped_data {
+        entry.dropped_data += 1;
+    }
+}
+
+async fn record_relay_enqueue_wait(
+    relay_stats: &RelayQueueStatsMap,
+    relay_id: &str,
+    enqueue_wait: Duration,
+) {
+    let relay_id = relay_id.trim();
+    if relay_id.is_empty() || enqueue_wait.is_zero() {
+        return;
+    }
+    let wait_ms = duration_to_millis_u64(enqueue_wait);
+    let mut guard = relay_stats.lock().await;
+    let entry = guard.entry(relay_id.to_string()).or_default();
+    entry.enqueue_wait_samples += 1;
+    entry.enqueue_wait_total_ms = entry.enqueue_wait_total_ms.saturating_add(wait_ms);
+    entry.enqueue_wait_max_ms = entry.enqueue_wait_max_ms.max(wait_ms);
+}
+
+async fn record_relay_scheduler_lag(
+    relay_stats: &RelayQueueStatsMap,
+    relay_id: &str,
+    scheduler_lag: Duration,
+) {
+    let relay_id = relay_id.trim();
+    if relay_id.is_empty() || scheduler_lag.is_zero() {
+        return;
+    }
+    let lag_ms = duration_to_millis_u64(scheduler_lag);
+    let mut guard = relay_stats.lock().await;
+    let entry = guard.entry(relay_id.to_string()).or_default();
+    entry.scheduler_lag_samples += 1;
+    entry.scheduler_lag_total_ms = entry.scheduler_lag_total_ms.saturating_add(lag_ms);
+    entry.scheduler_lag_max_ms = entry.scheduler_lag_max_ms.max(lag_ms);
+}
+
+async fn record_relay_sent(relay_stats: &RelayQueueStatsMap, relay_id: &str) {
+    let relay_id = relay_id.trim();
+    if relay_id.is_empty() {
+        return;
+    }
+    let mut guard = relay_stats.lock().await;
+    let entry = guard.entry(relay_id.to_string()).or_default();
+    entry.sent += 1;
+}
+
+async fn send_relay_outbound(
+    relay_outbound_tx: &mpsc::Sender<RelayOutboundEnvelope>,
+    relay_stats: &RelayQueueStatsMap,
+    outbound: RelayOutboundEnvelope,
+) -> Result<Duration, mpsc::error::SendError<RelayOutboundEnvelope>> {
+    let relay_id = outbound.relay_id.clone();
+    let send_started = Instant::now();
+    let result = relay_outbound_tx.send(outbound).await;
+    let enqueue_wait = send_started.elapsed();
+    record_relay_enqueue_wait(relay_stats, &relay_id, enqueue_wait).await;
+    result.map(|_| enqueue_wait)
+}
+
+async fn log_relay_queue_stats(relay_stats: &RelayQueueStatsMap, robot_id: &str, session_id: &str) {
+    let snapshot = relay_stats.lock().await.clone();
+    let mut relay_ids: Vec<String> = snapshot.keys().cloned().collect();
+    relay_ids.sort();
+    for relay_id in relay_ids {
+        let Some(stat) = snapshot.get(&relay_id) else {
+            continue;
+        };
+        let enqueue_wait_avg = if stat.enqueue_wait_samples > 0 {
+            stat.enqueue_wait_total_ms / stat.enqueue_wait_samples
+        } else {
+            0
+        };
+        let scheduler_lag_avg = if stat.scheduler_lag_samples > 0 {
+            stat.scheduler_lag_total_ms / stat.scheduler_lag_samples
+        } else {
+            0
+        };
+        tracing::info!(
+            "[relay] queue stats robot={} session_id={} relay={} sent={} dropped_data={} queue_depth_max={} enqueue_wait_avg_ms={} enqueue_wait_max_ms={} scheduler_lag_avg_ms={} scheduler_lag_max_ms={}",
+            robot_id,
+            session_id,
+            relay_id,
+            stat.sent,
+            stat.dropped_data,
+            stat.max_queue_depth,
+            enqueue_wait_avg,
+            stat.enqueue_wait_max_ms,
+            scheduler_lag_avg,
+            stat.scheduler_lag_max_ms
+        );
+    }
 }
 
 async fn open_local_relay(
     relay_id: String,
     port: u16,
-    outbound_tx: mpsc::Sender<String>,
+    outbound_tx: mpsc::Sender<RelayOutboundEnvelope>,
     relay_closed_tx: mpsc::Sender<String>,
     closed_relays: ClosedRelaySet,
+    relay_stats: RelayQueueStatsMap,
 ) -> Result<RelaySession, String> {
     let target = format!("127.0.0.1:{}", port);
     let stream = TcpStream::connect(&target)
@@ -1396,6 +1625,7 @@ async fn open_local_relay(
     let relay_closed_reader = relay_closed_tx.clone();
     let outbound_reader = outbound_tx.clone();
     let closed_relays_reader = closed_relays.clone();
+    let relay_stats_reader = relay_stats.clone();
     let reader_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 16 * 1024];
         let mut backpressure_active = false;
@@ -1404,30 +1634,35 @@ async fn open_local_relay(
             match read_half.read(&mut buf).await {
                 Ok(0) => {
                     mark_relay_closed(&closed_relays_reader, &relay_id_reader).await;
-                    let outbound = relay_control_message(
+                    let outbound = relay_control_envelope(
                         "relay_close",
                         &relay_id_reader,
                         None,
                         None,
                         Some("relay target closed"),
                     );
-                    let _ = outbound_reader.send(outbound).await;
+                    let _ =
+                        send_relay_outbound(&outbound_reader, &relay_stats_reader, outbound).await;
                     break;
                 }
                 Ok(n) => {
                     let encoded = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
-                    let outbound = relay_control_message(
+                    let outbound = relay_control_envelope(
                         "relay_data",
                         &relay_id_reader,
                         Some(encoded),
                         None,
                         None,
                     );
-                    let send_started = Instant::now();
-                    if outbound_reader.send(outbound).await.is_err() {
-                        break;
-                    }
-                    let enqueue_wait = send_started.elapsed();
+                    let enqueue_wait =
+                        match send_relay_outbound(&outbound_reader, &relay_stats_reader, outbound)
+                            .await
+                        {
+                            Ok(wait) => wait,
+                            Err(_) => {
+                                break;
+                            }
+                        };
                     if enqueue_wait >= Duration::from_millis(50) {
                         let now = Instant::now();
                         let should_log = match last_backpressure_log_at {
@@ -1460,14 +1695,15 @@ async fn open_local_relay(
                         err
                     );
                     mark_relay_closed(&closed_relays_reader, &relay_id_reader).await;
-                    let outbound = relay_control_message(
+                    let outbound = relay_control_envelope(
                         "relay_close",
                         &relay_id_reader,
                         None,
                         None,
                         Some(&format!("relay read error: {}", err)),
                     );
-                    let _ = outbound_reader.send(outbound).await;
+                    let _ =
+                        send_relay_outbound(&outbound_reader, &relay_stats_reader, outbound).await;
                     break;
                 }
             }
@@ -1590,7 +1826,23 @@ async fn send_webrtc_relay_event(
         .map_err(|_| "webrtc relay outbound channel closed".to_string())
 }
 
-fn relay_control_message(
+fn relay_control_envelope(
+    msg_type: &str,
+    relay_id: &str,
+    data: Option<String>,
+    status: Option<&str>,
+    error: Option<&str>,
+) -> RelayOutboundEnvelope {
+    let relay_id = relay_id.trim().to_string();
+    RelayOutboundEnvelope {
+        msg_type: msg_type.trim().to_string(),
+        relay_id: relay_id.clone(),
+        payload: relay_control_payload(msg_type, &relay_id, data, status, error),
+        enqueued_at: Instant::now(),
+    }
+}
+
+fn relay_control_payload(
     msg_type: &str,
     relay_id: &str,
     data: Option<String>,
@@ -1873,7 +2125,7 @@ mod tests {
         let closed_relays: ClosedRelaySet = Arc::new(Mutex::new(HashSet::new()));
         mark_relay_closed(&closed_relays, "relay-1").await;
 
-        let outbound = relay_control_message(
+        let outbound = relay_control_envelope(
             "relay_data",
             "relay-1",
             Some("Zm9v".to_string()),
@@ -1889,14 +2141,14 @@ mod tests {
         let closed_relays: ClosedRelaySet = Arc::new(Mutex::new(HashSet::new()));
         mark_relay_closed(&closed_relays, "relay-1").await;
 
-        let close_msg = relay_control_message(
+        let close_msg = relay_control_envelope(
             "relay_close",
             "relay-1",
             None,
             None,
             Some("relay target closed"),
         );
-        let other_data = relay_control_message(
+        let other_data = relay_control_envelope(
             "relay_data",
             "relay-2",
             Some("YmFy".to_string()),
@@ -1909,7 +2161,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn relay_control_fallback_uses_provided_outbound_channel() {
+    async fn relay_inbound_open_data_close_emits_expected_outbound() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let accept_task = tokio::spawn(async move {
@@ -1918,9 +2170,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         });
 
-        let (outbound_tx, mut outbound_rx) = mpsc::channel::<String>(8);
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<RelayOutboundEnvelope>(16);
         let (relay_closed_tx, _relay_closed_rx) = mpsc::channel::<String>(8);
         let closed_relays: ClosedRelaySet = Arc::new(Mutex::new(HashSet::new()));
+        let relay_stats: RelayQueueStatsMap = Arc::new(Mutex::new(HashMap::new()));
         let mut relays: HashMap<String, RelaySession> = HashMap::new();
 
         handle_relay_inbound_message(
@@ -1942,26 +2195,32 @@ mod tests {
             &outbound_tx,
             &relay_closed_tx,
             &closed_relays,
-            "control_fallback",
+            &relay_stats,
+            "relay",
         )
         .await;
 
-        let ack = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(ack.contains("\"type\":\"relay_open_ack\""), "ack={ack}");
-        assert!(ack.contains("\"status\":\"ok\""), "ack={ack}");
-
-        let data = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(data.contains("\"type\":\"relay_data\""), "data={data}");
-        assert!(
-            data.contains("\"relay_id\":\"relay-control-1\""),
-            "data={data}"
-        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_open_ack_ok = false;
+        let mut saw_data = false;
+        while Instant::now() < deadline && !(saw_open_ack_ok && saw_data) {
+            let maybe_msg =
+                tokio::time::timeout(Duration::from_millis(200), outbound_rx.recv()).await;
+            let Some(msg) = maybe_msg.ok().flatten() else {
+                continue;
+            };
+            if msg.msg_type == "relay_open_ack" {
+                let payload: serde_json::Value = serde_json::from_str(&msg.payload).unwrap();
+                if payload.get("status").and_then(serde_json::Value::as_str) == Some("ok") {
+                    saw_open_ack_ok = true;
+                }
+            }
+            if msg.msg_type == "relay_data" && msg.relay_id == "relay-control-1" {
+                saw_data = true;
+            }
+        }
+        assert!(saw_open_ack_ok, "expected relay_open_ack status=ok");
+        assert!(saw_data, "expected at least one relay_data frame");
 
         handle_relay_inbound_message(
             AgentControlInbound {
@@ -1982,10 +2241,102 @@ mod tests {
             &outbound_tx,
             &relay_closed_tx,
             &closed_relays,
-            "control_fallback",
+            &relay_stats,
+            "relay",
         )
         .await;
 
         accept_task.await.unwrap();
+    }
+
+    #[test]
+    fn relay_scheduler_round_robin_across_relays() {
+        let mut scheduler = RelayOutboundScheduler::new(8);
+        scheduler.enqueue(relay_control_envelope(
+            "relay_data",
+            "relay-a",
+            Some("YQ==".to_string()),
+            None,
+            None,
+        ));
+        scheduler.enqueue(relay_control_envelope(
+            "relay_data",
+            "relay-a",
+            Some("Yg==".to_string()),
+            None,
+            None,
+        ));
+        scheduler.enqueue(relay_control_envelope(
+            "relay_data",
+            "relay-b",
+            Some("Yw==".to_string()),
+            None,
+            None,
+        ));
+
+        let first = scheduler.pop_next().unwrap().relay_id;
+        let second = scheduler.pop_next().unwrap().relay_id;
+        let third = scheduler.pop_next().unwrap().relay_id;
+        assert_eq!(first, "relay-a");
+        assert_eq!(second, "relay-b");
+        assert_eq!(third, "relay-a");
+    }
+
+    #[test]
+    fn relay_scheduler_drops_oldest_data_but_keeps_control_priority() {
+        let mut scheduler = RelayOutboundScheduler::new(2);
+        let first = scheduler.enqueue(relay_control_envelope(
+            "relay_data",
+            "relay-a",
+            Some("MQ==".to_string()),
+            None,
+            None,
+        ));
+        assert!(!first.dropped_data);
+
+        let second = scheduler.enqueue(relay_control_envelope(
+            "relay_data",
+            "relay-a",
+            Some("Mg==".to_string()),
+            None,
+            None,
+        ));
+        assert!(!second.dropped_data);
+
+        let third = scheduler.enqueue(relay_control_envelope(
+            "relay_data",
+            "relay-a",
+            Some("Mw==".to_string()),
+            None,
+            None,
+        ));
+        assert!(third.dropped_data);
+
+        scheduler.enqueue(relay_control_envelope(
+            "relay_close",
+            "relay-a",
+            None,
+            None,
+            Some("done"),
+        ));
+
+        let control = scheduler.pop_next().unwrap();
+        assert_eq!(control.msg_type, "relay_close");
+
+        let data1 = scheduler.pop_next().unwrap();
+        let data2 = scheduler.pop_next().unwrap();
+        assert_eq!(data1.msg_type, "relay_data");
+        assert_eq!(data2.msg_type, "relay_data");
+
+        let payload1: serde_json::Value = serde_json::from_str(&data1.payload).unwrap();
+        let payload2: serde_json::Value = serde_json::from_str(&data2.payload).unwrap();
+        assert_eq!(
+            payload1.get("data").and_then(serde_json::Value::as_str),
+            Some("Mg==")
+        );
+        assert_eq!(
+            payload2.get("data").and_then(serde_json::Value::as_str),
+            Some("Mw==")
+        );
     }
 }

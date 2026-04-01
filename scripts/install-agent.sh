@@ -465,6 +465,14 @@ start_agent() {
     return
   fi
 
+  # Previous installs may have left a live agent running without a pid file.
+  # Stop the config-specific process first so a refresh can bind the port cleanly.
+  if pgrep -f "${INSTALL_BIN_DIR}/robotunnel-agent --config ${AGENT_CONFIG_PATH}" >/dev/null 2>&1; then
+    echo "[INFO] stopping existing agent process for config ${AGENT_CONFIG_PATH}"
+    pkill -f "${INSTALL_BIN_DIR}/robotunnel-agent --config ${AGENT_CONFIG_PATH}" || true
+    sleep 1
+  fi
+
   if [[ -f "${AGENT_PID_PATH}" ]]; then
     local old_pid
     old_pid="$(cat "${AGENT_PID_PATH}" 2>/dev/null || true)"
