@@ -78,8 +78,8 @@ robotunnel init "<platform-token>"
 ### Step 2. Install the agent on the robot
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/RussellTNY/robotunnel-agent/main/scripts/install-agent.sh -o install-agent.sh
-curl -fsSL https://raw.githubusercontent.com/RussellTNY/robotunnel-agent/main/scripts/install-agent.config.example -o install-agent.config
+curl -fsSL https://downloads.robotunnel.io/agent/install-agent.sh -o install-agent.sh
+curl -fsSL https://downloads.robotunnel.io/agent/install-agent.config.example -o install-agent.config
 
 # Edit install-agent.config:
 # - RT_KEY

@@ -20,6 +20,8 @@ AGENT_ID=""
 
 # Installation
 AGENT_REPO_URL="https://github.com/RussellTNY/robotunnel-agent.git"
+# Optional binary distribution base URL.
+AGENT_DOWNLOAD_BASE_URL="https://downloads.robotunnel.io/agent"
 # auto | release | build
 AGENT_INSTALL_METHOD="auto"
 # latest or a specific tag such as v0.3.0

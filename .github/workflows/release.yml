@@ -129,3 +129,111 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: dist/*
+
+  publish_downloads:
+    name: Publish downloads.robotunnel.io agent
+    needs: release
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL || 'https://downloads.robotunnel.io' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist
+          shasum -a 256 * > checksums.txt
+
+      - name: Build download layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG}"
+          version="${RELEASE_TAG#v}"
+          stage="publish"
+          public_base="${R2_PUBLIC_BASE_URL%/}/agent"
+
+          mkdir -p "${stage}/agent/${tag}" "${stage}/agent/latest"
+          cp dist/* "${stage}/agent/${tag}/"
+          cp dist/* "${stage}/agent/latest/"
+          printf '%s\n' "${tag}" > "${stage}/agent/${tag}/VERSION"
+          printf '%s\n' "${tag}" > "${stage}/agent/latest/VERSION"
+          cp scripts/install-agent.sh "${stage}/agent/install-agent.sh"
+          cp scripts/install-agent.config.example "${stage}/agent/install-agent.config.example"
+
+          cat > "${stage}/agent/latest.json" <<EOF
+          {
+            "tag": "${tag}",
+            "version": "${version}",
+            "base_url": "${public_base}/${tag}",
+            "assets": {
+              "linux_amd64": "robotunnel-agent-linux-amd64",
+              "linux_arm64": "robotunnel-agent-linux-arm64"
+            },
+            "checksums": "checksums.txt"
+          }
+          EOF
+
+      - name: Install AWS CLI
+        shell: bash
+        run: |
+          python3 -m pip install --user awscli
+          echo "$HOME/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: Upload immutable versioned assets
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          tag="${RELEASE_TAG}"
+          aws s3 cp "publish/agent/${tag}/" "s3://${R2_BUCKET}/agent/${tag}/" \
+            --recursive \
+            --only-show-errors \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --cache-control "public, max-age=31536000, immutable"
+
+      - name: Upload latest channel and installer assets
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 cp "publish/agent/latest/" "s3://${R2_BUCKET}/agent/latest/" \
+            --recursive \
+            --only-show-errors \
+            --endpoint-url "${endpoint}" \
+            --cache-control "public, max-age=300"
+          aws s3 cp "publish/agent/latest.json" "s3://${R2_BUCKET}/agent/latest.json" \
+            --only-show-errors \
+            --endpoint-url "${endpoint}" \
+            --cache-control "public, max-age=300" \
+            --content-type "application/json"
+          aws s3 cp "publish/agent/install-agent.sh" "s3://${R2_BUCKET}/agent/install-agent.sh" \
+            --only-show-errors \
+            --endpoint-url "${endpoint}" \
+            --cache-control "public, max-age=300" \
+            --content-type "text/x-shellscript"
+          aws s3 cp "publish/agent/install-agent.config.example" "s3://${R2_BUCKET}/agent/install-agent.config.example" \
+            --only-show-errors \
+            --endpoint-url "${endpoint}" \
+            --cache-control "public, max-age=300" \
+            --content-type "text/plain; charset=utf-8"

@@ -171,6 +171,13 @@ install_from_release() {
   fi
 
   echo "[INFO] release asset selected: ${asset_name}"
+  install_downloaded_asset "${asset_name}" "${asset_url}"
+  echo "[INFO] installed from GitHub release -> ${INSTALL_BIN_DIR}/robotunnel-agent"
+}
+
+install_downloaded_asset() {
+  local asset_name="$1"
+  local asset_url="$2"
   local tmp_dir downloaded candidate_bin
   tmp_dir="$(mktemp -d)"
   downloaded="${tmp_dir}/${asset_name}"
@@ -197,7 +204,62 @@ install_from_release() {
   mkdir -p "${INSTALL_BIN_DIR}"
   install -m 0755 "${candidate_bin}" "${INSTALL_BIN_DIR}/robotunnel-agent"
   rm -rf "${tmp_dir}"
-  echo "[INFO] installed from release -> ${INSTALL_BIN_DIR}/robotunnel-agent"
+}
+
+agent_asset_name_for_arch() {
+  local arch="$1"
+  case "${arch}" in
+    amd64) echo "robotunnel-agent-linux-amd64" ;;
+    arm64) echo "robotunnel-agent-linux-arm64" ;;
+    *)
+      echo "[ERROR] unsupported release architecture: ${arch}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+install_from_downloads() {
+  local arch="$1"
+  local base_url asset_name asset_url manifest_url manifest_json manifest_base
+  base_url="$(trim_trailing_slash "${AGENT_DOWNLOAD_BASE_URL}")"
+  asset_name="$(agent_asset_name_for_arch "${arch}")"
+
+  if [[ "${AGENT_RELEASE_TAG}" == "latest" ]]; then
+    manifest_url="${base_url}/latest.json"
+    echo "[INFO] checking agent downloads manifest: ${manifest_url}"
+    if ! manifest_json="$(curl -fsSL "${manifest_url}")"; then
+      echo "[WARN] failed to query agent downloads manifest"
+      return 1
+    fi
+
+    asset_name="$({
+      echo "${manifest_json}" | jq -r --arg arch "${arch}" '
+        .assets[
+          if $arch == "amd64" then "linux_amd64"
+          elif $arch == "arm64" then "linux_arm64"
+          else "__missing__"
+          end
+        ] // empty
+      ' | head -n 1
+    } || true)"
+
+    manifest_base="$({
+      echo "${manifest_json}" | jq -r '.base_url // empty' | head -n 1
+    } || true)"
+
+    if [[ -z "${asset_name}" || -z "${manifest_base}" || "${manifest_base}" == "null" ]]; then
+      echo "[WARN] agent downloads manifest missing asset metadata for linux/${arch}"
+      return 1
+    fi
+
+    asset_url="$(trim_trailing_slash "${manifest_base}")/${asset_name}"
+  else
+    asset_url="${base_url}/${AGENT_RELEASE_TAG}/${asset_name}"
+  fi
+
+  echo "[INFO] downloads asset selected: ${asset_name}"
+  install_downloaded_asset "${asset_name}" "${asset_url}"
+  echo "[INFO] installed from downloads -> ${INSTALL_BIN_DIR}/robotunnel-agent"
 }
 
 install_from_source() {
@@ -431,6 +493,7 @@ start_agent() {
 # ---------- Defaults ----------
 PLATFORM_BASE_URL="${PLATFORM_BASE_URL:-https://api.robotunnel.io}"
 AGENT_REPO_URL="${AGENT_REPO_URL:-https://github.com/RussellTNY/robotunnel-agent.git}"
+AGENT_DOWNLOAD_BASE_URL="${AGENT_DOWNLOAD_BASE_URL:-https://downloads.robotunnel.io/agent}"
 AGENT_INSTALL_METHOD="${AGENT_INSTALL_METHOD:-auto}"
 AGENT_RELEASE_TAG="${AGENT_RELEASE_TAG:-latest}"
 INSTALL_BIN_DIR="${INSTALL_BIN_DIR:-$HOME/.local/bin}"
@@ -462,13 +525,22 @@ ARCH="$(detect_arch)"
 # ---------- Install ----------
 case "${AGENT_INSTALL_METHOD}" in
   auto)
-    if ! install_from_release "${ARCH}"; then
-      echo "[INFO] fallback to source build"
-      install_from_source
+    if ! install_from_downloads "${ARCH}"; then
+      echo "[INFO] fallback to GitHub release"
+      if ! install_from_release "${ARCH}"; then
+        echo "[INFO] fallback to source build"
+        install_from_source
+      fi
     fi
     ;;
   release)
-    install_from_release "${ARCH}"
+    if ! install_from_downloads "${ARCH}"; then
+      echo "[INFO] fallback to GitHub release"
+      if ! install_from_release "${ARCH}"; then
+        echo "[ERROR] failed to install from downloads or GitHub release" >&2
+        exit 1
+      fi
+    fi
     ;;
   build)
     install_from_source

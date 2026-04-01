@@ -538,6 +538,9 @@ pub fn start_control_plane_bridge_if_enabled(
             let (control_outbound_tx, mut control_outbound_rx) = mpsc::channel::<String>(512);
             let (relay_outbound_tx, relay_outbound_rx) = mpsc::channel::<String>(2048);
             let closed_relays: ClosedRelaySet = Arc::new(Mutex::new(HashSet::new()));
+            let (control_relay_closed_tx, mut control_relay_closed_rx) =
+                mpsc::channel::<String>(128);
+            let mut control_relays: HashMap<String, RelaySession> = HashMap::new();
             let (relay_stop_tx, relay_stop_rx) = watch::channel(false);
             let relay_task = tokio::spawn(run_relay_plane(
                 platform_ws_url.clone(),
@@ -791,12 +794,14 @@ pub fn start_control_plane_bridge_if_enabled(
                                                 }
                                             }
                                             "relay_open" | "relay_data" | "relay_close" => {
-                                                tracing::warn!(
-                                                    "[control] unexpected relay message on control channel: robot={} session_id={} type={}",
-                                                    robot_id,
-                                                    session_id,
-                                                    msg.msg_type
-                                                );
+                                                handle_relay_inbound_message(
+                                                    msg,
+                                                    &mut control_relays,
+                                                    &control_outbound_tx,
+                                                    &control_relay_closed_tx,
+                                                    &closed_relays,
+                                                    "control_fallback",
+                                                ).await;
                                             }
                                             other => {
                                                 tracing::debug!("[control] ignoring message type={}", other);
@@ -868,6 +873,13 @@ pub fn start_control_plane_bridge_if_enabled(
                             }
                         }
                     }
+                    Some(relay_id) = control_relay_closed_rx.recv() => {
+                        mark_relay_closed(&closed_relays, &relay_id).await;
+                        if let Some(relay) = control_relays.remove(&relay_id) {
+                            relay.reader_task.abort();
+                            relay.writer_task.abort();
+                        }
+                    }
                     _ = shutdown_rx.changed() => {
                         shutdown_requested = true;
                         break;
@@ -875,6 +887,10 @@ pub fn start_control_plane_bridge_if_enabled(
                 }
             }
 
+            for (_, relay) in control_relays.drain() {
+                relay.reader_task.abort();
+                relay.writer_task.abort();
+            }
             let _ = relay_stop_tx.send(true);
             let _ = timeout(Duration::from_secs(2), relay_task).await;
             let _ = control_write.send(Message::Close(None)).await;
@@ -1890,5 +1906,86 @@ mod tests {
 
         assert!(!should_drop_closed_relay_outbound(&close_msg, &closed_relays).await);
         assert!(!should_drop_closed_relay_outbound(&other_data, &closed_relays).await);
+    }
+
+    #[tokio::test]
+    async fn relay_control_fallback_uses_provided_outbound_channel() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(b"foxglove").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        let (outbound_tx, mut outbound_rx) = mpsc::channel::<String>(8);
+        let (relay_closed_tx, _relay_closed_rx) = mpsc::channel::<String>(8);
+        let closed_relays: ClosedRelaySet = Arc::new(Mutex::new(HashSet::new()));
+        let mut relays: HashMap<String, RelaySession> = HashMap::new();
+
+        handle_relay_inbound_message(
+            AgentControlInbound {
+                msg_type: "relay_open".to_string(),
+                bootstrap_id: None,
+                session_key: None,
+                cli_public_ip: None,
+                cli_lan_cidr: None,
+                route_type: None,
+                request_id: None,
+                command: None,
+                status_query: None,
+                relay_id: Some("relay-control-1".to_string()),
+                port: Some(port),
+                data: None,
+            },
+            &mut relays,
+            &outbound_tx,
+            &relay_closed_tx,
+            &closed_relays,
+            "control_fallback",
+        )
+        .await;
+
+        let ack = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ack.contains("\"type\":\"relay_open_ack\""), "ack={ack}");
+        assert!(ack.contains("\"status\":\"ok\""), "ack={ack}");
+
+        let data = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(data.contains("\"type\":\"relay_data\""), "data={data}");
+        assert!(
+            data.contains("\"relay_id\":\"relay-control-1\""),
+            "data={data}"
+        );
+
+        handle_relay_inbound_message(
+            AgentControlInbound {
+                msg_type: "relay_close".to_string(),
+                bootstrap_id: None,
+                session_key: None,
+                cli_public_ip: None,
+                cli_lan_cidr: None,
+                route_type: None,
+                request_id: None,
+                command: None,
+                status_query: None,
+                relay_id: Some("relay-control-1".to_string()),
+                port: None,
+                data: None,
+            },
+            &mut relays,
+            &outbound_tx,
+            &relay_closed_tx,
+            &closed_relays,
+            "control_fallback",
+        )
+        .await;
+
+        accept_task.await.unwrap();
     }
 }
