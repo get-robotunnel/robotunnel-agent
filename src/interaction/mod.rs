@@ -371,19 +371,42 @@ impl RelayOutboundScheduler {
     }
 
     fn pop_next(&mut self) -> Option<RelayOutboundEnvelope> {
-        let turns = self.order.len();
-        for _ in 0..turns {
+        // Global control-first scheduling: scan all active relays and send one
+        // control frame before any relay_data frame. This keeps relay_open_ack /
+        // relay_close responsive even under heavy data bursts from other relays.
+        let control_turns = self.order.len();
+        for _ in 0..control_turns {
             let relay_id = match self.order.pop_front() {
                 Some(v) => v,
                 None => return None,
             };
             let (msg, has_more) = match self.queues.get_mut(&relay_id) {
                 Some(queue) => {
-                    let msg = if let Some(control_msg) = queue.control.pop_front() {
-                        Some(control_msg)
-                    } else {
-                        queue.data.pop_front()
-                    };
+                    let msg = queue.control.pop_front();
+                    let has_more = !queue.control.is_empty() || !queue.data.is_empty();
+                    (msg, has_more)
+                }
+                None => (None, false),
+            };
+            if has_more {
+                self.order.push_back(relay_id.clone());
+            } else {
+                self.queues.remove(&relay_id);
+            }
+            if msg.is_some() {
+                return msg;
+            }
+        }
+
+        let data_turns = self.order.len();
+        for _ in 0..data_turns {
+            let relay_id = match self.order.pop_front() {
+                Some(v) => v,
+                None => return None,
+            };
+            let (msg, has_more) = match self.queues.get_mut(&relay_id) {
+                Some(queue) => {
+                    let msg = queue.data.pop_front();
                     let has_more = !queue.control.is_empty() || !queue.data.is_empty();
                     (msg, has_more)
                 }
@@ -1492,7 +1515,7 @@ async fn enqueue_relay_outbound(
     let entry = guard.entry(relay_id).or_default();
     entry.max_queue_depth = entry.max_queue_depth.max(outcome.queue_depth);
     if outcome.dropped_data {
-        entry.dropped_data += 1;
+        entry.dropped_data = entry.dropped_data.saturating_add(1);
     }
 }
 
@@ -1546,7 +1569,31 @@ async fn send_relay_outbound(
     outbound: RelayOutboundEnvelope,
 ) -> Result<Duration, mpsc::error::SendError<RelayOutboundEnvelope>> {
     let relay_id = outbound.relay_id.clone();
+    let msg_type = outbound.msg_type.trim().to_string();
     let send_started = Instant::now();
+    if msg_type == "relay_data" {
+        match relay_outbound_tx.try_send(outbound) {
+            Ok(()) => {
+                let enqueue_wait = send_started.elapsed();
+                record_relay_enqueue_wait(relay_stats, &relay_id, enqueue_wait).await;
+                return Ok(enqueue_wait);
+            }
+            Err(TrySendError::Full(_)) => {
+                // Drop newest relay_data when the shared outbound channel is full
+                // so control traffic can still make progress.
+                let enqueue_wait = send_started.elapsed();
+                record_relay_enqueue_wait(relay_stats, &relay_id, enqueue_wait).await;
+                let mut guard = relay_stats.lock().await;
+                let entry = guard.entry(relay_id).or_default();
+                entry.dropped_data = entry.dropped_data.saturating_add(1);
+                return Ok(enqueue_wait);
+            }
+            Err(TrySendError::Closed(msg)) => {
+                return Err(mpsc::error::SendError(msg));
+            }
+        }
+    }
+
     let result = relay_outbound_tx.send(outbound).await;
     let enqueue_wait = send_started.elapsed();
     record_relay_enqueue_wait(relay_stats, &relay_id, enqueue_wait).await;
@@ -2280,6 +2327,36 @@ mod tests {
         assert_eq!(first, "relay-a");
         assert_eq!(second, "relay-b");
         assert_eq!(third, "relay-a");
+    }
+
+    #[test]
+    fn relay_scheduler_prioritizes_control_globally() {
+        let mut scheduler = RelayOutboundScheduler::new(8);
+        scheduler.enqueue(relay_control_envelope(
+            "relay_data",
+            "relay-a",
+            Some("YQ==".to_string()),
+            None,
+            None,
+        ));
+        scheduler.enqueue(relay_control_envelope(
+            "relay_data",
+            "relay-b",
+            Some("Yg==".to_string()),
+            None,
+            None,
+        ));
+        scheduler.enqueue(relay_control_envelope(
+            "relay_open_ack",
+            "relay-z",
+            None,
+            Some("ok"),
+            None,
+        ));
+
+        let first = scheduler.pop_next().unwrap();
+        assert_eq!(first.msg_type, "relay_open_ack");
+        assert_eq!(first.relay_id, "relay-z");
     }
 
     #[test]
