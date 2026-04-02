@@ -288,10 +288,13 @@ struct AgentControlInbound {
     port: Option<u16>,
     #[serde(default)]
     data: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 struct RelaySession {
     write_tx: mpsc::Sender<Vec<u8>>,
+    close_tx: watch::Sender<bool>,
     reader_task: JoinHandle<()>,
     writer_task: JoinHandle<()>,
 }
@@ -320,6 +323,13 @@ struct RelayQueueStats {
 type RelayQueueStatsMap = Arc<Mutex<HashMap<String, RelayQueueStats>>>;
 
 const RELAY_DATA_QUEUE_LIMIT: usize = 256;
+const RELAY_CLOSE_GRACE: Duration = Duration::from_millis(250);
+
+#[derive(Debug, Default, Clone, Copy)]
+struct RelayQueuePurgeOutcome {
+    dropped_control: usize,
+    dropped_data: usize,
+}
 
 #[derive(Default)]
 struct RelayOutboundQueue {
@@ -423,6 +433,21 @@ impl RelayOutboundScheduler {
         }
         None
     }
+
+    fn purge_relay(&mut self, relay_id: &str) -> RelayQueuePurgeOutcome {
+        let relay_id = relay_id.trim();
+        if relay_id.is_empty() {
+            return RelayQueuePurgeOutcome::default();
+        }
+        self.order.retain(|item| item != relay_id);
+        if let Some(queue) = self.queues.remove(relay_id) {
+            return RelayQueuePurgeOutcome {
+                dropped_control: queue.control.len(),
+                dropped_data: queue.data.len(),
+            };
+        }
+        RelayQueuePurgeOutcome::default()
+    }
 }
 
 fn duration_to_millis_u64(duration: Duration) -> u64 {
@@ -469,10 +494,12 @@ impl WebRtcRelayContext {
             return Err("invalid relay_open payload".to_string());
         }
 
-        let mut relays = self.relays.lock().await;
-        if let Some(prev) = relays.remove(&relay_id) {
-            prev.reader_task.abort();
-            prev.writer_task.abort();
+        let previous = {
+            let mut relays = self.relays.lock().await;
+            relays.remove(&relay_id)
+        };
+        if let Some(prev) = previous {
+            stop_relay_session(&relay_id, prev, "webrtc_relay_replaced").await;
         }
         let relay = open_local_webrtc_relay(
             relay_id.clone(),
@@ -481,6 +508,7 @@ impl WebRtcRelayContext {
             self.relay_closed_tx.clone(),
         )
         .await?;
+        let mut relays = self.relays.lock().await;
         relays.insert(relay_id, relay);
         Ok(())
     }
@@ -497,10 +525,12 @@ impl WebRtcRelayContext {
 
         if let Some(tx) = write_tx {
             if tx.send(chunk).await.is_err() {
-                let mut relays = self.relays.lock().await;
-                if let Some(stale) = relays.remove(relay_id) {
-                    stale.reader_task.abort();
-                    stale.writer_task.abort();
+                let stale = {
+                    let mut relays = self.relays.lock().await;
+                    relays.remove(relay_id)
+                };
+                if let Some(stale) = stale {
+                    stop_relay_session(relay_id, stale, "webrtc_relay_write_channel_closed").await;
                 }
                 return Err("relay write channel closed".to_string());
             }
@@ -514,10 +544,12 @@ impl WebRtcRelayContext {
         if relay_id.is_empty() {
             return;
         }
-        let mut relays = self.relays.lock().await;
-        if let Some(relay) = relays.remove(relay_id) {
-            relay.reader_task.abort();
-            relay.writer_task.abort();
+        let relay = {
+            let mut relays = self.relays.lock().await;
+            relays.remove(relay_id)
+        };
+        if let Some(relay) = relay {
+            stop_relay_session(relay_id, relay, "webrtc_relay_close_requested").await;
         }
     }
 
@@ -526,12 +558,12 @@ impl WebRtcRelayContext {
         if relay_id.is_empty() {
             return;
         }
-        {
+        let relay = {
             let mut relays = self.relays.lock().await;
-            if let Some(relay) = relays.remove(&relay_id) {
-                relay.reader_task.abort();
-                relay.writer_task.abort();
-            }
+            relays.remove(&relay_id)
+        };
+        if let Some(relay) = relay {
+            stop_relay_session(&relay_id, relay, "webrtc_local_target_closed").await;
         }
         let _ = send_webrtc_relay_event(
             &self.outbound_tx,
@@ -546,10 +578,12 @@ impl WebRtcRelayContext {
     }
 
     async fn shutdown(&self) {
-        let mut relays = self.relays.lock().await;
-        for (_, relay) in relays.drain() {
-            relay.reader_task.abort();
-            relay.writer_task.abort();
+        let drained_relays: Vec<(String, RelaySession)> = {
+            let mut relays = self.relays.lock().await;
+            relays.drain().collect()
+        };
+        for (relay_id, relay) in drained_relays {
+            stop_relay_session(&relay_id, relay, "webrtc_context_shutdown").await;
         }
     }
 }
@@ -1216,9 +1250,17 @@ async fn run_relay_plane(
                 }
                 Some(relay_id) = relay_closed_rx.recv() => {
                     mark_relay_closed(&closed_relays, &relay_id).await;
+                    let purged = scheduler.purge_relay(&relay_id);
+                    if purged.dropped_control > 0 || purged.dropped_data > 0 {
+                        tracing::info!(
+                            "[relay] purged queued outbound after local close relay={} control={} data={}",
+                            relay_id,
+                            purged.dropped_control,
+                            purged.dropped_data
+                        );
+                    }
                     if let Some(relay) = relays.remove(&relay_id) {
-                        relay.reader_task.abort();
-                        relay.writer_task.abort();
+                        stop_relay_session(&relay_id, relay, "relay_local_close_signal").await;
                     }
                 }
                 maybe_msg = relay_read.next() => {
@@ -1232,6 +1274,7 @@ async fn run_relay_plane(
                                             handle_relay_inbound_message(
                                                 msg,
                                                 &mut relays,
+                                                &mut scheduler,
                                                 &relay_outbound_tx,
                                                 &relay_closed_tx,
                                                 &closed_relays,
@@ -1314,9 +1357,17 @@ async fn run_relay_plane(
             }
         }
 
-        for (_, relay) in relays.drain() {
-            relay.reader_task.abort();
-            relay.writer_task.abort();
+        for (relay_id, relay) in relays.drain() {
+            let purged = scheduler.purge_relay(&relay_id);
+            if purged.dropped_control > 0 || purged.dropped_data > 0 {
+                tracing::info!(
+                    "[relay] purged queued outbound during relay teardown relay={} control={} data={}",
+                    relay_id,
+                    purged.dropped_control,
+                    purged.dropped_data
+                );
+            }
+            stop_relay_session(&relay_id, relay, "relay_plane_teardown").await;
         }
         let _ = relay_write.send(Message::Close(None)).await;
         log_relay_queue_stats(&relay_stats, &robot_id, &relay_session_id).await;
@@ -1338,6 +1389,7 @@ async fn run_relay_plane(
 async fn handle_relay_inbound_message(
     msg: AgentControlInbound,
     relays: &mut HashMap<String, RelaySession>,
+    scheduler: &mut RelayOutboundScheduler,
     relay_outbound_tx: &mpsc::Sender<RelayOutboundEnvelope>,
     relay_closed_tx: &mpsc::Sender<String>,
     closed_relays: &ClosedRelaySet,
@@ -1348,6 +1400,7 @@ async fn handle_relay_inbound_message(
         "relay_open" => {
             let relay_id = normalize_optional(msg.relay_id.clone());
             let port = msg.port.unwrap_or_default();
+            let open_started = Instant::now();
             if relay_id.is_none() || port == 0 {
                 let outbound = relay_control_envelope(
                     "relay_open_ack",
@@ -1362,8 +1415,16 @@ async fn handle_relay_inbound_message(
             let relay_id = relay_id.unwrap_or_default();
             clear_relay_closed(closed_relays, &relay_id).await;
             if let Some(prev) = relays.remove(&relay_id) {
-                prev.reader_task.abort();
-                prev.writer_task.abort();
+                let purged = scheduler.purge_relay(&relay_id);
+                if purged.dropped_control > 0 || purged.dropped_data > 0 {
+                    tracing::info!(
+                        "[relay] purged queued outbound before relay reopen relay={} control={} data={}",
+                        relay_id,
+                        purged.dropped_control,
+                        purged.dropped_data
+                    );
+                }
+                stop_relay_session(&relay_id, prev, "relay_reopen_replace").await;
             }
             match open_local_relay(
                 relay_id.clone(),
@@ -1377,15 +1438,24 @@ async fn handle_relay_inbound_message(
             {
                 Ok(relay) => {
                     relays.insert(relay_id.clone(), relay);
+                    tracing::info!(
+                        "[relay] relay_open ok source={} relay={} port={} elapsed_ms={}",
+                        source,
+                        relay_id,
+                        port,
+                        open_started.elapsed().as_millis()
+                    );
                     let outbound =
                         relay_control_envelope("relay_open_ack", &relay_id, None, Some("ok"), None);
                     let _ = send_relay_outbound(relay_outbound_tx, relay_stats, outbound).await;
                 }
                 Err(err) => {
                     tracing::warn!(
-                        "[relay] open local relay failed source={} relay={} err={}",
+                        "[relay] open local relay failed source={} relay={} port={} elapsed_ms={} err={}",
                         source,
                         relay_id,
+                        port,
+                        open_started.elapsed().as_millis(),
                         err
                     );
                     let outbound = relay_control_envelope(
@@ -1421,8 +1491,16 @@ async fn handle_relay_inbound_message(
             if let Some(write_tx) = relay_write_tx {
                 if write_tx.send(decoded).await.is_err() {
                     if let Some(stale) = relays.remove(&relay_id) {
-                        stale.reader_task.abort();
-                        stale.writer_task.abort();
+                        let purged = scheduler.purge_relay(&relay_id);
+                        if purged.dropped_control > 0 || purged.dropped_data > 0 {
+                            tracing::info!(
+                                "[relay] purged queued outbound after write channel close relay={} control={} data={}",
+                                relay_id,
+                                purged.dropped_control,
+                                purged.dropped_data
+                            );
+                        }
+                        stop_relay_session(&relay_id, stale, "relay_write_channel_closed").await;
                     }
                     let outbound = relay_control_envelope(
                         "relay_close",
@@ -1449,10 +1527,26 @@ async fn handle_relay_inbound_message(
             if relay_id.is_empty() {
                 return;
             }
+            let close_reason = normalize_optional(msg.error.clone())
+                .unwrap_or_else(|| "upstream relay_close".to_string());
+            tracing::info!(
+                "[relay] relay_close received source={} relay={} reason={}",
+                source,
+                relay_id,
+                close_reason
+            );
             mark_relay_closed(closed_relays, &relay_id).await;
+            let purged = scheduler.purge_relay(&relay_id);
+            if purged.dropped_control > 0 || purged.dropped_data > 0 {
+                tracing::info!(
+                    "[relay] purged queued outbound on relay_close relay={} control={} data={}",
+                    relay_id,
+                    purged.dropped_control,
+                    purged.dropped_data
+                );
+            }
             if let Some(relay) = relays.remove(&relay_id) {
-                relay.reader_task.abort();
-                relay.writer_task.abort();
+                stop_relay_session(&relay_id, relay, &close_reason).await;
             }
         }
         _ => {}
@@ -1488,6 +1582,44 @@ async fn clear_relay_closed(closed_relays: &ClosedRelaySet, relay_id: &str) {
         return;
     }
     closed_relays.lock().await.remove(relay_id);
+}
+
+async fn await_relay_task_with_abort(
+    mut task: JoinHandle<()>,
+    relay_id: &str,
+    task_name: &str,
+) {
+    if timeout(RELAY_CLOSE_GRACE, &mut task).await.is_ok() {
+        return;
+    }
+    tracing::debug!(
+        "[relay] graceful close timed out relay={} task={} grace_ms={}, aborting",
+        relay_id,
+        task_name,
+        RELAY_CLOSE_GRACE.as_millis()
+    );
+    task.abort();
+    let _ = task.await;
+}
+
+async fn stop_relay_session(relay_id: &str, relay: RelaySession, reason: &str) {
+    let relay_id = relay_id.trim();
+    let reason = reason.trim();
+    let RelaySession {
+        write_tx,
+        close_tx,
+        reader_task,
+        writer_task,
+    } = relay;
+    let _ = close_tx.send(true);
+    drop(write_tx);
+    await_relay_task_with_abort(writer_task, relay_id, "writer").await;
+    await_relay_task_with_abort(reader_task, relay_id, "reader").await;
+    tracing::debug!(
+        "[relay] relay session stopped relay={} reason={}",
+        relay_id,
+        if reason.is_empty() { "unspecified" } else { reason }
+    );
 }
 
 async fn should_drop_closed_relay_outbound(
@@ -1648,19 +1780,33 @@ async fn open_local_relay(
         .map_err(|err| format!("connect {} failed: {}", target, err))?;
     let (mut read_half, mut write_half) = tokio::io::split(stream);
     let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (close_tx, close_rx) = watch::channel(false);
 
     let relay_id_writer = relay_id.clone();
     let relay_closed_writer = relay_closed_tx.clone();
     let closed_relays_writer = closed_relays.clone();
+    let mut close_rx_writer = close_rx.clone();
     let writer_task = tokio::spawn(async move {
-        while let Some(chunk) = write_rx.recv().await {
-            if let Err(err) = write_half.write_all(&chunk).await {
-                tracing::warn!(
-                    "[relay] relay writer failed relay={} err={}",
-                    relay_id_writer,
-                    err
-                );
-                break;
+        loop {
+            tokio::select! {
+                maybe_chunk = write_rx.recv() => {
+                    let Some(chunk) = maybe_chunk else {
+                        break;
+                    };
+                    if let Err(err) = write_half.write_all(&chunk).await {
+                        tracing::warn!(
+                            "[relay] relay writer failed relay={} err={}",
+                            relay_id_writer,
+                            err
+                        );
+                        break;
+                    }
+                }
+                _ = close_rx_writer.changed() => {
+                    if *close_rx_writer.borrow() {
+                        break;
+                    }
+                }
             }
         }
         let _ = write_half.shutdown().await;
@@ -1673,12 +1819,19 @@ async fn open_local_relay(
     let outbound_reader = outbound_tx.clone();
     let closed_relays_reader = closed_relays.clone();
     let relay_stats_reader = relay_stats.clone();
+    let mut close_rx_reader = close_rx;
     let reader_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 16 * 1024];
         let mut backpressure_active = false;
         let mut last_backpressure_log_at: Option<Instant> = None;
         loop {
-            match read_half.read(&mut buf).await {
+            tokio::select! {
+                _ = close_rx_reader.changed() => {
+                    if *close_rx_reader.borrow() {
+                        break;
+                    }
+                }
+                read_result = read_half.read(&mut buf) => match read_result {
                 Ok(0) => {
                     mark_relay_closed(&closed_relays_reader, &relay_id_reader).await;
                     let outbound = relay_control_envelope(
@@ -1753,6 +1906,7 @@ async fn open_local_relay(
                         send_relay_outbound(&outbound_reader, &relay_stats_reader, outbound).await;
                     break;
                 }
+                }
             }
         }
         mark_relay_closed(&closed_relays_reader, &relay_id_reader).await;
@@ -1761,6 +1915,7 @@ async fn open_local_relay(
 
     Ok(RelaySession {
         write_tx,
+        close_tx,
         reader_task,
         writer_task,
     })
@@ -1778,18 +1933,32 @@ async fn open_local_webrtc_relay(
         .map_err(|err| format!("connect {} failed: {}", target, err))?;
     let (mut read_half, mut write_half) = tokio::io::split(stream);
     let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (close_tx, close_rx) = watch::channel(false);
 
     let relay_id_writer = relay_id.clone();
     let relay_closed_writer = relay_closed_tx.clone();
+    let mut close_rx_writer = close_rx.clone();
     let writer_task = tokio::spawn(async move {
-        while let Some(chunk) = write_rx.recv().await {
-            if let Err(err) = write_half.write_all(&chunk).await {
-                tracing::warn!(
-                    "[webrtc] relay writer failed relay={} err={}",
-                    relay_id_writer,
-                    err
-                );
-                break;
+        loop {
+            tokio::select! {
+                maybe_chunk = write_rx.recv() => {
+                    let Some(chunk) = maybe_chunk else {
+                        break;
+                    };
+                    if let Err(err) = write_half.write_all(&chunk).await {
+                        tracing::warn!(
+                            "[webrtc] relay writer failed relay={} err={}",
+                            relay_id_writer,
+                            err
+                        );
+                        break;
+                    }
+                }
+                _ = close_rx_writer.changed() => {
+                    if *close_rx_writer.borrow() {
+                        break;
+                    }
+                }
             }
         }
         let _ = write_half.shutdown().await;
@@ -1799,10 +1968,17 @@ async fn open_local_webrtc_relay(
     let relay_id_reader = relay_id.clone();
     let relay_closed_reader = relay_closed_tx.clone();
     let outbound_reader = outbound_tx.clone();
+    let mut close_rx_reader = close_rx;
     let reader_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 16 * 1024];
         loop {
-            match read_half.read(&mut buf).await {
+            tokio::select! {
+                _ = close_rx_reader.changed() => {
+                    if *close_rx_reader.borrow() {
+                        break;
+                    }
+                }
+                read_result = read_half.read(&mut buf) => match read_result {
                 Ok(0) => {
                     let _ = send_webrtc_relay_event(
                         &outbound_reader,
@@ -1847,6 +2023,7 @@ async fn open_local_webrtc_relay(
                     .await;
                     break;
                 }
+                }
             }
         }
         let _ = relay_closed_reader.send(relay_id_reader).await;
@@ -1854,6 +2031,7 @@ async fn open_local_webrtc_relay(
 
     Ok(RelaySession {
         write_tx,
+        close_tx,
         reader_task,
         writer_task,
     })
@@ -2222,6 +2400,7 @@ mod tests {
         let closed_relays: ClosedRelaySet = Arc::new(Mutex::new(HashSet::new()));
         let relay_stats: RelayQueueStatsMap = Arc::new(Mutex::new(HashMap::new()));
         let mut relays: HashMap<String, RelaySession> = HashMap::new();
+        let mut scheduler = RelayOutboundScheduler::new(RELAY_DATA_QUEUE_LIMIT);
 
         handle_relay_inbound_message(
             AgentControlInbound {
@@ -2237,8 +2416,10 @@ mod tests {
                 relay_id: Some("relay-control-1".to_string()),
                 port: Some(port),
                 data: None,
+                error: None,
             },
             &mut relays,
+            &mut scheduler,
             &outbound_tx,
             &relay_closed_tx,
             &closed_relays,
@@ -2283,8 +2464,10 @@ mod tests {
                 relay_id: Some("relay-control-1".to_string()),
                 port: None,
                 data: None,
+                error: None,
             },
             &mut relays,
+            &mut scheduler,
             &outbound_tx,
             &relay_closed_tx,
             &closed_relays,
@@ -2294,6 +2477,71 @@ mod tests {
         .await;
 
         accept_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn relay_close_purges_queued_data_for_same_relay() {
+        let (outbound_tx, _outbound_rx) = mpsc::channel::<RelayOutboundEnvelope>(16);
+        let (relay_closed_tx, _relay_closed_rx) = mpsc::channel::<String>(8);
+        let closed_relays: ClosedRelaySet = Arc::new(Mutex::new(HashSet::new()));
+        let relay_stats: RelayQueueStatsMap = Arc::new(Mutex::new(HashMap::new()));
+        let mut relays: HashMap<String, RelaySession> = HashMap::new();
+        let mut scheduler = RelayOutboundScheduler::new(8);
+
+        scheduler.enqueue(relay_control_envelope(
+            "relay_data",
+            "relay-a",
+            Some("YQ==".to_string()),
+            None,
+            None,
+        ));
+        scheduler.enqueue(relay_control_envelope(
+            "relay_data",
+            "relay-b",
+            Some("Yg==".to_string()),
+            None,
+            None,
+        ));
+        scheduler.enqueue(relay_control_envelope(
+            "relay_data",
+            "relay-a",
+            Some("Yw==".to_string()),
+            None,
+            None,
+        ));
+
+        handle_relay_inbound_message(
+            AgentControlInbound {
+                msg_type: "relay_close".to_string(),
+                bootstrap_id: None,
+                session_key: None,
+                cli_public_ip: None,
+                cli_lan_cidr: None,
+                route_type: None,
+                request_id: None,
+                command: None,
+                status_query: None,
+                relay_id: Some("relay-a".to_string()),
+                port: None,
+                data: None,
+                error: Some("client_disconnected".to_string()),
+            },
+            &mut relays,
+            &mut scheduler,
+            &outbound_tx,
+            &relay_closed_tx,
+            &closed_relays,
+            &relay_stats,
+            "relay",
+        )
+        .await;
+
+        let mut seen = Vec::new();
+        while let Some(msg) = scheduler.pop_next() {
+            seen.push(msg.relay_id);
+        }
+        assert_eq!(seen, vec!["relay-b".to_string()]);
+        assert!(closed_relays.lock().await.contains("relay-a"));
     }
 
     #[test]
