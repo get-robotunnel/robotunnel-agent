@@ -331,7 +331,7 @@ fn heuristic_plan(query: &str) -> AssistantDecision {
     if lower.contains("shell") || lower.contains("命令") || lower.contains("执行") {
         if let Some(cmd) = extract_backtick_block(query) {
             return AssistantDecision {
-                reply: "This requires approval before I run a shell command.".to_string(),
+                reply: "This requires approval before I run a shell command. Reply with `rt confirm` to continue.".to_string(),
                 summary: "Run host_debug.shell".to_string(),
                 needs_confirmation: true,
                 confirmation_reason: "Shell execution can modify robot state.".to_string(),
@@ -344,7 +344,7 @@ fn heuristic_plan(query: &str) -> AssistantDecision {
         }
         return AssistantDecision {
             reply:
-                "To run a shell command, include it in backticks, for example: `ros2 node list`."
+                "To run shell via chat, say: 请执行 `ros2 node list`. Or use explicit command: `rt shell <robot> ros2 node list` (in robot thread: `rt shell -- ros2 node list`)."
                     .to_string(),
             summary: "Need explicit shell command".to_string(),
             needs_confirmation: false,
@@ -827,8 +827,18 @@ mod tests {
     fn test_heuristic_shell_requires_confirmation() {
         let decision = heuristic_plan("请执行 `ros2 node list`");
         assert!(decision.needs_confirmation);
+        assert!(decision.reply.contains("rt confirm"));
         let tool = decision.tool.expect("tool");
         assert_eq!(tool.skill, "host_debug");
         assert_eq!(tool.action, "shell");
+    }
+
+    #[test]
+    fn test_heuristic_shell_without_backticks_returns_clear_guidance() {
+        let decision = heuristic_plan("执行shell ros2 node list");
+        assert!(!decision.needs_confirmation);
+        assert!(decision.tool.is_none());
+        assert!(decision.reply.contains("rt shell"));
+        assert!(decision.reply.contains("请执行 `ros2 node list`"));
     }
 }
