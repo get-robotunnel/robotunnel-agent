@@ -15,6 +15,8 @@
 
 ---
 
+Official website: [robotunnel.io](https://robotunnel.io)
+
 RoboTunnel Agent is the open-source process that runs on your robot. It keeps the robot reachable for remote debugging, owns the robot-side trust boundary, and hosts the local skill surface used by the CLI and Discord integrations.
 
 For `v0.3.0`, the main job is narrow on purpose: help ROS 2 developers debug real robots behind NAT, on unstable field networks, without forcing them into a brittle SSH + ad hoc port-forwarding workflow.
@@ -286,3 +288,7 @@ If you want the deeper installation, support-flow, or reference docs, use the pu
 | `v0.4.x` | Harder Debug Projection sessions, stronger observability, better session quality on weak links |
 | `v0.5.x` | Better team workflows through Discord, alerts, and shared operational context |
 | `Later` | Fleet-level diagnostics and broader operational workflows after the robot-level debug path is dependable |
+
+## License
+
+Licensed under the [MIT License](./LICENSE).
