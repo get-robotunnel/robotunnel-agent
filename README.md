@@ -2,9 +2,9 @@
 
 # RoboTunnel Agent
 
-**ROS 2 remote debugging that actually works.**
+**Robot operations infrastructure that actually works.**
 
-*Open-source robot-side agent for local-first debugging, managed debug sessions, and Debug Projection.*
+*Open-source robot-side runtime for managed connectivity, debug sessions, and robot operations workflows.*
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Rust 1.75+](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org)
@@ -17,15 +17,15 @@
 
 Official website: [robotunnel.io](https://robotunnel.io)
 
-RoboTunnel Agent is the open-source process that runs on your robot. It keeps the robot reachable for remote debugging, owns the robot-side trust boundary, and hosts the local skill surface used by the CLI and Discord integrations.
+RoboTunnel Agent is the open-source process that runs on your robot. It keeps the robot reachable for operations and debugging, owns the robot-side trust boundary, and hosts the local skill surface used by the CLI and Discord integrations.
 
-For `v0.3.0`, the main job is narrow on purpose: help ROS 2 developers debug real robots behind NAT, on unstable field networks, without forcing them into a brittle SSH + ad hoc port-forwarding workflow.
+For `v0.3.0`, the main job is narrow on purpose: provide a reliable foundation for robot operations in NAT-heavy, unstable field networks, starting from the ROS 2 debug path.
 
-## Why RoboTunnel
+## Why RoboTunnel Agent
 
 ROS 2 remote debugging usually fails in exactly the moments you need it most. The robot is behind NAT, onsite Wi-Fi is weak, SSH drops, forwarded ports drift out of sync, and the tools you actually want to use, like Foxglove, RViz, `ros2 topic`, and structured robot-side diagnostics, stop being dependable.
 
-RoboTunnel takes a different path. The agent runs on the robot, keeps trust and LLM execution local, and lets you start managed debug sessions from the CLI. Instead of treating remote debugging as raw tunnel plumbing, RoboTunnel adds a Debug Projection layer that adapts robot topics for real-world links while preserving the workflows developers already know.
+RoboTunnel takes a different path. The agent runs on the robot, keeps trust and LLM execution local, and lets you run managed sessions from the CLI and team workflows from Discord. Instead of treating operations as raw tunnel plumbing, RoboTunnel adds a robot-side Debug Projection layer and skill surface that stays usable on real-world links.
 
 ## Architecture
 
@@ -272,7 +272,7 @@ Trust is a product feature, not a footer note.
 
 - Robot OS: Ubuntu 20.04+ / Debian 11+
 - ROS 2: Humble / Iron / Jazzy
-- Primary promise: ROS 2 remote debugging for robots behind NAT
+- Primary promise: robot operations foundation for ROS 2 robots behind NAT
 - Supported onboarding path: hosted RoboTunnel platform
 - Expert path still supported: `robotunnel connect`
 - Advanced option exists: `PLATFORM_BASE_URL` can be overridden for internal or experimental setups
@@ -284,7 +284,7 @@ If you want the deeper installation, support-flow, or reference docs, use the pu
 
 | Version | Focus |
 |---|---|
-| `v0.3.0` | Remote debugging that actually works for ROS 2 robots behind NAT |
+| `v0.3.0` | Robot operations foundation that actually works for ROS 2 robots behind NAT |
 | `v0.4.x` | Harder Debug Projection sessions, stronger observability, better session quality on weak links |
 | `v0.5.x` | Better team workflows through Discord, alerts, and shared operational context |
 | `Later` | Fleet-level diagnostics and broader operational workflows after the robot-level debug path is dependable |
